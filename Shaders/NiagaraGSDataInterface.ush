@@ -1,0 +1,75 @@
+// NiagaraGSDataInterface.ush
+// Included by Niagara's generated shader when UNiagaraGSDataInterface is active.
+// {DataInterfaceHLSLSymbol} is replaced at compile time by Niagara with a
+// unique prefix so multiple NDI instances don't collide.
+
+// ── Buffer declarations ───────────────────────────────────────────────────────
+// These must exactly match the SHADER_PARAMETER_SRV entries in
+// FNiagaraGSShaderParameters (NiagaraGSDataInterfaceGPU.h).
+
+int        {DataInterfaceHLSLSymbol}_SplatCount;
+Buffer<float4> {DataInterfaceHLSLSymbol}_Positions;
+Buffer<float4> {DataInterfaceHLSLSymbol}_Scales;
+Buffer<float4> {DataInterfaceHLSLSymbol}_Rotations;
+Buffer<float4> {DataInterfaceHLSLSymbol}_ColorOpacity;
+
+// ── GetSplatCount ─────────────────────────────────────────────────────────────
+void {DataInterfaceHLSLSymbol}_GetSplatCount(out int OutCount)
+{
+    OutCount = {DataInterfaceHLSLSymbol}_SplatCount;
+}
+
+// ── GetSplatPosition ──────────────────────────────────────────────────────────
+void {DataInterfaceHLSLSymbol}_GetSplatPosition(
+    int Index, out float3 OutPosition)
+{
+    OutPosition = (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
+        ? {DataInterfaceHLSLSymbol}_Positions[Index].xyz
+        : float3(0, 0, 0);
+}
+
+// ── GetSplatScale ─────────────────────────────────────────────────────────────
+void {DataInterfaceHLSLSymbol}_GetSplatScale(
+    int Index, out float3 OutScale)
+{
+    OutScale = (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
+        ? {DataInterfaceHLSLSymbol}_Scales[Index].xyz
+        : float3(1, 1, 1);
+}
+
+// ── GetSplatOrientation ───────────────────────────────────────────────────────
+// Returns quaternion components separately because Niagara scratch pads
+// don't have a native quat type — the scratch pad reassembles them.
+void {DataInterfaceHLSLSymbol}_GetSplatOrientation(
+    int Index,
+    out float OutQX, out float OutQY,
+    out float OutQZ, out float OutQW)
+{
+    if (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
+    {
+        float4 Q = {DataInterfaceHLSLSymbol}_Rotations[Index];
+        OutQX = Q.x; OutQY = Q.y; OutQZ = Q.z; OutQW = Q.w;
+    }
+    else
+    {
+        OutQX = 0; OutQY = 0; OutQZ = 0; OutQW = 1;
+    }
+}
+
+// ── GetSplatColor ─────────────────────────────────────────────────────────────
+void {DataInterfaceHLSLSymbol}_GetSplatColor(
+    int Index, out float3 OutColor)
+{
+    OutColor = (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
+        ? {DataInterfaceHLSLSymbol}_ColorOpacity[Index].xyz
+        : float3(0.5, 0.5, 0.5);
+}
+
+// ── GetSplatOpacity ───────────────────────────────────────────────────────────
+void {DataInterfaceHLSLSymbol}_GetSplatOpacity(
+    int Index, out float OutOpacity)
+{
+    OutOpacity = (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
+        ? {DataInterfaceHLSLSymbol}_ColorOpacity[Index].w
+        : 0.0;
+}
