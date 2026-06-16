@@ -27,6 +27,7 @@ public class NiagaraGS : ModuleRules
             "NiagaraCore",
             "VectorVM",
             "NiagaraShader",
+            "RenderCore", // Shader compiler mapping support
         });
 
         // Editor-only modules — stripped from packaged builds
@@ -34,12 +35,12 @@ public class NiagaraGS : ModuleRules
         {
             PrivateDependencyModuleNames.AddRange(new string[]
             {
-                "UnrealEd",       // UFactory base class, import framework
-                "AssetTools",     // IAssetTypeActions, asset category registration
-                "ContentBrowser", // Content Browser integration
-                "Slate",       // ← add
-                "SlateCore",   // ← add
-                "WorkspaceMenuStructure", // ← add (for tab category)
+                "UnrealEd",               // UFactory base class, import framework
+                "AssetTools",             // IAssetTypeActions, asset category registration
+                "ContentBrowser",         // Content Browser integration
+                "Slate",                  // Layout and UI
+                "SlateCore",              // Core widget and style types
+                "WorkspaceMenuStructure", // Tab category structures
             });
         }
 

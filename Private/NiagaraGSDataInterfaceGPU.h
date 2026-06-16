@@ -8,22 +8,7 @@
 #include "NiagaraDataInterfaceRW.h"
 #include "GaussianSplatData.h"
 
-// ── Per-splat GPU layout ──────────────────────────────────────────────────────
-// We pack splat data into four float4 buffers.
-// float4 wastes the W channel on position and scale but keeps
-// buffer reads aligned on 16 bytes which is optimal on all GPU vendors.
-//
-// Buffer layout:
-//   Positions   [float4]  xyz=position   w=unused
-//   Scales      [float4]  xyz=scale      w=unused
-//   Rotations   [float4]  xyzw=quaternion
-//   ColorOpacity[float4]  xyz=color      w=opacity
-
-// ── Shader parameter struct ───────────────────────────────────────────────────
-// This macro generates a struct that Unreal's RHI knows how to bind
-// to a shader. Each SHADER_PARAMETER_SRV maps to a Buffer<float4>
-// in our HLSL (read-only structured buffer view).
-
+// GPU Memory layout. Structured buffers wrapped by RHI Shader Resource Views (SRV)
 BEGIN_SHADER_PARAMETER_STRUCT(FNiagaraGSShaderParameters, )
     SHADER_PARAMETER(int32, SplatCount)
     SHADER_PARAMETER_SRV(Buffer<float4>, Positions)
@@ -31,10 +16,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FNiagaraGSShaderParameters, )
     SHADER_PARAMETER_SRV(Buffer<float4>, Rotations)
     SHADER_PARAMETER_SRV(Buffer<float4>, ColorOpacity)
 END_SHADER_PARAMETER_STRUCT()
-
-// ── A single typed GPU buffer + its SRV ──────────────────────────────────────
-// We wrap these together because they're always created and destroyed
-// as a pair. FVertexBuffer gives us a properly RHI-tracked buffer object.
 
 struct FNiagaraGSSplatBuffer
 {
@@ -50,42 +31,20 @@ struct FNiagaraGSSplatBuffer
     }
 };
 
-// ── GPU Proxy ─────────────────────────────────────────────────────────────────
-// One proxy exists per NDI instance on the render thread.
-// It owns the four GPU buffers and is responsible for uploading
-// data from the CPU exactly once (on first SetShaderParameters call).
-//
-// Lifecycle:
-//   NDI::PostInitProperties  → creates the proxy (on game thread)
-//   NDI::SetShaderParameters → proxy uploads data if not yet uploaded
-//   NDI destroyed            → proxy released, buffers freed
-
 struct FNDIGaussianSplatProxy : public FNiagaraDataInterfaceProxyRW
 {
-    // ── GPU buffers ───────────────────────────────────────────────
     FNiagaraGSSplatBuffer PositionsBuffer;
     FNiagaraGSSplatBuffer ScalesBuffer;
     FNiagaraGSSplatBuffer RotationsBuffer;
     FNiagaraGSSplatBuffer ColorOpacityBuffer;
 
-    // How many splats are in the buffers
     int32 SplatCount = 0;
-
-    // Set to true after first successful upload
     bool bBuffersReady = false;
 
-    // ── Upload ────────────────────────────────────────────────────
-    // Called from the render thread via ENQUEUE_RENDER_COMMAND.
-    // Takes a snapshot of the CPU splat array and pushes it to VRAM.
     void UploadData(const TArray<FGaussianSplatData>& Splats);
 
-    // ── FNiagaraDataInterfaceProxyRW interface ────────────────────
-    virtual int32 PerInstanceDataPassedToRenderThreadSize() const override
-    {
-        return 0; // we don't use per-instance game thread data
-    }
+    virtual int32 PerInstanceDataPassedToRenderThreadSize() const override { return 0; }
 
-    // Release all GPU resources — called on render thread during cleanup
     void ReleaseBuffers()
     {
         PositionsBuffer.Release();
@@ -96,11 +55,26 @@ struct FNDIGaussianSplatProxy : public FNiagaraDataInterfaceProxyRW
         SplatCount = 0;
     }
 
+    // CRITICAL THREAD SAFETY FIX:
+    // This destructor can execute on the GC sweep channel (Game Thread).
+    // Direct RHI releases of buffer/SRV handles on the Game Thread trigger instant graphics engine driver assertions!
+    // We safely package and command-enqueue the releases onto the Render Thread.
     virtual ~FNDIGaussianSplatProxy()
     {
-        // Buffers must be released on the render thread
-        // By the time this destructor runs UE has already
-        // flushed the render thread so direct release is safe here
-        ReleaseBuffers();
+        FNiagaraGSSplatBuffer TempPositions = PositionsBuffer;
+        FNiagaraGSSplatBuffer TempScales = ScalesBuffer;
+        FNiagaraGSSplatBuffer TempRotations = RotationsBuffer;
+        FNiagaraGSSplatBuffer TempColorOpacity = ColorOpacityBuffer;
+
+        ENQUEUE_RENDER_COMMAND(NiagaraGS_ProxyReleaseRHI)(
+            [TempPositions, TempScales, TempRotations, TempColorOpacity](FRHICommandListImmediate& RHICmdList) mutable
+            {
+                // Execute SafeRelease safely under the correct thread!
+                TempPositions.Release();
+                TempScales.Release();
+                TempRotations.Release();
+                TempColorOpacity.Release();
+            }
+            );
     }
 };
