@@ -307,15 +307,100 @@ void UNiagaraGSDataInterface::PostEditChangeProperty(FPropertyChangedEvent& Prop
 }
 #endif
 
-void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
-    const FNiagaraDataInterfaceGPUParamInfo& ParamInfo,
-    FString& OutHLSL)
+void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(const FNiagaraDataInterfaceGPUParamInfo& ParamInfo, FString& OutHLSL)
 {
-    // The virtual path "/NiagaraGS/NiagaraGSDataInterface.ush" maps to
-    // Plugins/NiagaraGS/Shaders/NiagaraGSDataInterface.ush via the
-    // directory mapping we registered in StartupModule (Step 1).
-    OutHLSL += TEXT("#include \"/NiagaraGS/NiagaraGSDataInterface.ush\"\n");
+    // URGENT COMPILER FIX:
+    // To prevent Niagara shader compilation freezes/hangs, we define the helper functions 
+    // dynamically as a C++ string here, instead of using a static #include file.
+    // Why: Niagara's {Parameter} regex-replacement ONLY runs on the dynamic C++ string returned 
+    // by this function. It does NOT crawl static .ush '#include' files pre-compilation. 
+    // If the .ush file is included, DXC receives un-replaced curly braces (e.g. {Parameter}_Positions),
+    // which results in catastrophic compiler loops/crashes in the editor.
+    // We also omit redundant type declarations for our parameters because BuildShaderParameters() 
+    // already automatically exposes flattened parameter bindings to the shader context!
+    //
+    // CRITICAL: We must manually replace "{Parameter}" in our custom C++ dynamic string with 
+    // ParamInfo.DataInterfaceHLSLSymbol, as Niagara's translation pass does not automatically 
+    // replace braces inside raw strings appended to OutHLSL from C++.
+
+    const FString Symbol = ParamInfo.DataInterfaceHLSLSymbol;
+
+    FString TemplateCode =
+        TEXT("void {Parameter}_GetSplatCount(out int OutCount)\n")
+        TEXT("{\n")
+        TEXT("    OutCount = {Parameter}.SplatCount;\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatPosition(int Index, out float3 OutPosition)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        OutPosition = {Parameter}.Positions[Index].xyz;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("    {\n")
+        TEXT("        OutPosition = float3(0.0f, 0.0f, 0.0f);\n")
+        TEXT("    }\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatScale(int Index, out float3 OutScale)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        OutScale = {Parameter}.Scales[Index].xyz;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("    {\n")
+        TEXT("        OutScale = float3(1.0f, 1.0f, 1.0f);\n")
+        TEXT("    }\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatOrientation(int Index, out float OutQX, out float OutQY, out float OutQZ, out float OutQW)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        float4 Q = {Parameter}.Rotations[Index];\n")
+        TEXT("        OutQX = Q.x;\n")
+        TEXT("        OutQY = Q.y;\n")
+        TEXT("        OutQZ = Q.z;\n")
+        TEXT("        OutQW = Q.w;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("    {\n")
+        TEXT("        OutQX = 0.0f;\n")
+        TEXT("        OutQY = 0.0f;\n")
+        TEXT("        OutQZ = 0.0f;\n")
+        TEXT("        OutQW = 1.0f;\n")
+        TEXT("    }\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatColor(int Index, out float3 OutColor)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        OutColor = {Parameter}.ColorOpacity[Index].xyz;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("        OutColor = float3(0.5f, 0.5f, 0.5f);\n")
+        TEXT("    }\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatOpacity(int Index, out float OutOpacity)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        OutOpacity = {Parameter}.ColorOpacity[Index].w;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("    {\n")
+        TEXT("        OutOpacity = 0.0f;\n")
+        TEXT("    }\n")
+        TEXT("}\n\n");
+
+    TemplateCode.ReplaceInline(TEXT("{Parameter}"), *Symbol);
+    OutHLSL += TemplateCode;
 }
+
 
 bool UNiagaraGSDataInterface::GetFunctionHLSL(
     const FNiagaraDataInterfaceGPUParamInfo& ParamInfo,
