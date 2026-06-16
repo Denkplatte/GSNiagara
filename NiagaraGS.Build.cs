@@ -16,7 +16,6 @@ public class NiagaraGS : ModuleRules
             "Renderer",
             "Projects",
             "InputCore",
-            "UnrealEd",   // For FAssetImportInfo, which we use to track source .ply files
             "Niagara",
         });
 

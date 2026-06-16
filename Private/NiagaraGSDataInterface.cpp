@@ -1,9 +1,9 @@
-﻿#include "RHI.h"
+﻿#include "NiagaraGSDataInterface.h"
+#include "RHI.h"
 #include "RHIResources.h"
 #include "RHIDefinitions.h"
 #include "NiagaraDataInterfaceRW.h"
 
-#include "NiagaraGSDataInterface.h"
 #include "NiagaraTypes.h"
 #include "NiagaraCustomVersion.h"
 #include "NiagaraShaderParametersBuilder.h"
@@ -415,7 +415,7 @@ void UNiagaraGSDataInterface::GetSplatOpacity(
     }
 }
 
-void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats)
+/*void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats)
 {
     const int32 Count = Splats.Num();
     if (Count == 0)
@@ -501,8 +501,74 @@ void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats
     const int32 TotalBytes = Count * sizeof(FVector4f) * 4;
     UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Enqueued %d splats for GPU upload (%d MB)"), Count, TotalBytes / (1024 * 1024));
 }
+*/
+void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats)
+{
+    // Must be called on the render thread (via ENQUEUE_RENDER_COMMAND in UploadToGPU)
+    check(IsInRenderingThread());
 
+    const int32 Count = Splats.Num();
+    ReleaseBuffers();  // safe — we're on the render thread, no race
 
+    if (Count == 0) return;
+
+    // Pack CPU data
+    TArray<FVector4f> PackedPositions, PackedScales, PackedRotations, PackedColorOpacity;
+    PackedPositions.SetNumUninitialized(Count);
+    PackedScales.SetNumUninitialized(Count);
+    PackedRotations.SetNumUninitialized(Count);
+    PackedColorOpacity.SetNumUninitialized(Count);
+
+    for (int32 i = 0; i < Count; ++i)
+    {
+        const FGaussianSplatData& S = Splats[i];
+        PackedPositions[i] = FVector4f(S.Position.X, S.Position.Y, S.Position.Z, 0.f);
+        PackedScales[i] = FVector4f(S.Scale.X, S.Scale.Y, S.Scale.Z, 0.f);
+        PackedRotations[i] = FVector4f(S.Orientation.X, S.Orientation.Y, S.Orientation.Z, S.Orientation.W);
+        PackedColorOpacity[i] = FVector4f(S.Color.X, S.Color.Y, S.Color.Z, S.Opacity);
+    }
+
+    // Helper — create one buffer+SRV directly on the render thread
+    // No nested ENQUEUE needed; we ARE on the render thread already.
+    auto CreateBuffer = [](
+        FRHICommandListImmediate& RHICmdList,
+        FNiagaraGSSplatBuffer& OutBuffer,
+        const TArray<FVector4f>& Data,
+        const TCHAR* DebugName)
+        {
+            const int32 BufferSize = Data.Num() * sizeof(FVector4f);
+
+            FRHIBufferCreateDesc Desc =
+                FRHIBufferCreateDesc::Create(DebugName,
+                    EBufferUsageFlags::Static | EBufferUsageFlags::ShaderResource)
+                .SetSize(BufferSize)
+                .SetStride(sizeof(FVector4f))
+                .SetInitialState(ERHIAccess::SRVCompute);
+
+            OutBuffer.Buffer = RHICmdList.CreateBuffer(Desc);
+
+            void* Dest = RHICmdList.LockBuffer(OutBuffer.Buffer, 0, BufferSize, RLM_WriteOnly);
+            FMemory::Memcpy(Dest, Data.GetData(), BufferSize);
+            RHICmdList.UnlockBuffer(OutBuffer.Buffer);
+
+            FShaderResourceViewInitializer SRVInit(OutBuffer.Buffer, PF_A32B32G32R32F);
+            OutBuffer.SRV = RHICmdList.CreateShaderResourceView(SRVInit);
+        };
+
+    // We need an RHICmdList — get the immediate one since we're on the render thread
+    FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+
+    CreateBuffer(RHICmdList, PositionsBuffer, PackedPositions, TEXT("GS_Positions"));
+    CreateBuffer(RHICmdList, ScalesBuffer, PackedScales, TEXT("GS_Scales"));
+    CreateBuffer(RHICmdList, RotationsBuffer, PackedRotations, TEXT("GS_Rotations"));
+    CreateBuffer(RHICmdList, ColorOpacityBuffer, PackedColorOpacity, TEXT("GS_ColorOpacity"));
+
+    SplatCount = Count;
+    bBuffersReady = true;  // ← set AFTER buffers are actually created
+
+    UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Uploaded %d splats (%d MB)"),
+        Count, (Count * (int32)sizeof(FVector4f) * 4) / (1024 * 1024));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  NDI GPU interface implementations
@@ -529,16 +595,18 @@ void UNiagaraGSDataInterface::UploadToGPU()
 {
     if (!SplatAsset || SplatAsset->SplatData.Num() == 0) return;
 
-    // Capture data for the render thread lambda.
-    // We copy the array here on the game thread so the render thread
-    // never touches SplatAsset directly (it's a UObject, not thread-safe).
-    TArray<FGaussianSplatData> SplatsCopy = SplatAsset->SplatData;
     FNDIGaussianSplatProxy* ProxyPtr = GetProxyAs<FNDIGaussianSplatProxy>();
+    if (!ProxyPtr) return;
+
+    TArray<FGaussianSplatData> SplatsCopy = SplatAsset->SplatData;
 
     ENQUEUE_RENDER_COMMAND(NiagaraGS_Upload)(
         [ProxyPtr, SplatsCopy = MoveTemp(SplatsCopy)]
         (FRHICommandListImmediate& RHICmdList) mutable
         {
+            // UploadData now uses GetImmediateCommandList() internally,
+            // or you can pass RHICmdList through — either works since
+            // we're already on the render thread here.
             ProxyPtr->UploadData(SplatsCopy);
         });
 }
