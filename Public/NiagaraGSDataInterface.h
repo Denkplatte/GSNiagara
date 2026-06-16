@@ -5,10 +5,12 @@
 #include "NiagaraCommon.h"
 #include "GaussianSplatData.h"
 #include "GaussianSplatAsset.h"
+#include "NiagaraGSDataInterfaceGPU.h"    // proxy + shader param struct
+#include "NiagaraDataInterfaceRW.h"
+#include "NiagaraShaderParametersBuilder.h"
 #include "NiagaraGSDataInterface.generated.h"
 
-#include "NiagaraGSDataInterfaceGPU.h"    // proxy + shader param struct
-#include "NiagaraShaderParametersBuilder.h"
+
 
 // Forward declare the GPU proxy — defined in Step 5
 struct FNDIGaussianSplatProxy;
@@ -98,7 +100,7 @@ public:
         FString& OutHLSL) override;
 
     // Required — tells Niagara we're using the new (non-legacy) binding path
-    virtual bool UseLegacyShaderBindings() const override { return false; }
+    //virtual bool UseLegacyShaderBindings() const override { return false; }
 
     // Declares the layout of our shader parameter struct to Niagara
     virtual void BuildShaderParameters(
@@ -111,6 +113,13 @@ public:
 
     // Triggers the CPU→GPU upload when asset is assigned or changed
     void UploadToGPU();
+
+    virtual void PostLoad() override;
+
+#if WITH_EDITOR
+    virtual void PostEditChangeProperty(
+        struct FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
 
 private:
 

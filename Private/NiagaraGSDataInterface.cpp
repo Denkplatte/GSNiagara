@@ -1,8 +1,17 @@
-﻿#include "NiagaraGSDataInterface.h"
+﻿#include "RHI.h"
+#include "RHIResources.h"
+#include "RHIDefinitions.h"
+#include "NiagaraDataInterfaceRW.h"
+
+#include "NiagaraGSDataInterface.h"
 #include "NiagaraTypes.h"
 #include "NiagaraCustomVersion.h"
 #include "NiagaraShaderParametersBuilder.h"
 #include "VectorVM.h"
+
+#include "NiagaraGSDataInterfaceGPU.h"
+#include "RHICommandList.h"
+#include "RenderingThread.h"
 
 // ── Static name definitions ───────────────────────────────────────────────────
 // Defining them here means they're initialised exactly once and shared across
@@ -15,25 +24,6 @@ const FName UNiagaraGSDataInterface::Name_GetSplatOrientation(TEXT("GetSplatOrie
 const FName UNiagaraGSDataInterface::Name_GetSplatColor(TEXT("GetSplatColor"));
 const FName UNiagaraGSDataInterface::Name_GetSplatOpacity(TEXT("GetSplatOpacity"));
 
-// ── PostInitProperties ────────────────────────────────────────────────────────
-
-void UNiagaraGSDataInterface::PostInitProperties()
-{
-    Super::PostInitProperties();
-
-    // Register our NDI type with Niagara's type registry.
-    // This must happen here (not in module startup) because the registry
-    // is guaranteed to exist by the time PostInitProperties fires on the CDO.
-    if (HasAnyFlags(RF_ClassDefaultObject))
-    {
-        ENiagaraTypeRegistryFlags DIFlags =
-            ENiagaraTypeRegistryFlags::AllowAnyVariable |
-            ENiagaraTypeRegistryFlags::AllowParameter;
-
-        FNiagaraTypeRegistry::Register(
-            FNiagaraTypeDefinition(GetClass()), DIFlags);
-    }
-}
 
 // ── CopyToInternal / Equals ───────────────────────────────────────────────────
 // Niagara calls these when duplicating or comparing NDI instances.
@@ -422,5 +412,314 @@ void UNiagaraGSDataInterface::GetSplatOpacity(
         {
             OutOpacity.SetAndAdvance(0.0f);
         }
+    }
+}
+
+void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats)
+{
+    const int32 Count = Splats.Num();
+    if (Count == 0)
+    {
+        ReleaseBuffers();
+        return;
+    }
+
+    // 1. Pack CPU data
+    TArray<FVector4f> PackedPositions;
+    TArray<FVector4f> PackedScales;
+    TArray<FVector4f> PackedRotations;
+    TArray<FVector4f> PackedColorOpacity;
+
+    PackedPositions.SetNumUninitialized(Count);
+    PackedScales.SetNumUninitialized(Count);
+    PackedRotations.SetNumUninitialized(Count);
+    PackedColorOpacity.SetNumUninitialized(Count);
+
+    for (int32 i = 0; i < Count; ++i)
+    {
+        const FGaussianSplatData& S = Splats[i];
+        PackedPositions[i] = FVector4f(S.Position.X, S.Position.Y, S.Position.Z, 0.0f);
+        PackedScales[i] = FVector4f(S.Scale.X, S.Scale.Y, S.Scale.Z, 0.0f);
+        PackedRotations[i] = FVector4f(S.Orientation.X, S.Orientation.Y, S.Orientation.Z, S.Orientation.W);
+        PackedColorOpacity[i] = FVector4f(S.Color.X, S.Color.Y, S.Color.Z, S.Opacity);
+    }
+
+    // 2. Safely defer buffer creation and allocation to the Render Thread
+    struct FBufferInitData
+    {
+        TArray<FVector4f> Data;
+        FNiagaraGSSplatBuffer* TargetBuffer;
+        const TCHAR* DebugName;
+    };
+
+    // Construct an array of references to fill asynchronously 
+    TSharedPtr<TArray<FBufferInitData>, ESPMode::ThreadSafe> InitArray = MakeShared<TArray<FBufferInitData>, ESPMode::ThreadSafe>();
+    InitArray->Add({ MoveTemp(PackedPositions), &PositionsBuffer, TEXT("GS_Positions") });
+    InitArray->Add({ MoveTemp(PackedScales), &ScalesBuffer, TEXT("GS_Scales") });
+    InitArray->Add({ MoveTemp(PackedRotations), &RotationsBuffer, TEXT("GS_Rotations") });
+    InitArray->Add({ MoveTemp(PackedColorOpacity), &ColorOpacityBuffer, TEXT("GS_ColorOpacity") });
+
+    ReleaseBuffers();
+
+    // Enqueue the work to run on the Render Thread
+    ENQUEUE_RENDER_COMMAND(FNiagaraGSUploadBufferData)(
+        [InitArray](FRHICommandListImmediate& RHICmdList) // UE provides RHICmdList automatically here
+        {
+            for (const FBufferInitData& InitData : *InitArray)
+            {
+                if (InitData.Data.Num() == 0) continue;
+
+                const int32 BufferSize = InitData.Data.Num() * sizeof(FVector4f);
+
+                // 1. Descriptor setup (UE 5.6 chained syntax)
+                FRHIBufferCreateDesc CreateInfo = FRHIBufferCreateDesc::Create(InitData.DebugName, EBufferUsageFlags::Static | EBufferUsageFlags::ShaderResource)
+                    .SetSize(BufferSize)
+                    .SetStride(sizeof(FVector4f))
+                    .SetInitialState(ERHIAccess::Unknown);
+
+                // 2. Create the buffer using the render thread's command list
+                InitData.TargetBuffer->Buffer = RHICmdList.CreateBuffer(CreateInfo);
+
+                // 3. Lock, write, and unlock
+                void* Dest = RHICmdList.LockBuffer(InitData.TargetBuffer->Buffer, 0, BufferSize, RLM_WriteOnly);
+                FMemory::Memcpy(Dest, InitData.Data.GetData(), BufferSize);
+                RHICmdList.UnlockBuffer(InitData.TargetBuffer->Buffer);
+
+                // 4. Generate the Shader Resource View
+                // 4. Generate the Shader Resource View directly without a descriptor
+               // 4. Generate the Shader Resource View via explicit initializer
+                FShaderResourceViewInitializer ViewInitializer(InitData.TargetBuffer->Buffer, PF_A32B32G32R32F);
+                InitData.TargetBuffer->SRV = RHICmdList.CreateShaderResourceView(ViewInitializer);
+
+
+            }
+        });
+
+    SplatCount = Count;
+    bBuffersReady = true;
+
+    const int32 TotalBytes = Count * sizeof(FVector4f) * 4;
+    UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Enqueued %d splats for GPU upload (%d MB)"), Count, TotalBytes / (1024 * 1024));
+}
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  NDI GPU interface implementations
+// ─────────────────────────────────────────────────────────────────────────────
+
+void UNiagaraGSDataInterface::PostInitProperties()
+{
+    Super::PostInitProperties();
+
+    if (HasAnyFlags(RF_ClassDefaultObject))
+    {
+        ENiagaraTypeRegistryFlags DIFlags =
+            ENiagaraTypeRegistryFlags::AllowAnyVariable |
+            ENiagaraTypeRegistryFlags::AllowParameter;
+
+        FNiagaraTypeRegistry::Register(
+            FNiagaraTypeDefinition(GetClass()), DIFlags);
+    }
+
+    Proxy = MakeUnique<FNDIGaussianSplatProxy>();
+}
+
+void UNiagaraGSDataInterface::UploadToGPU()
+{
+    if (!SplatAsset || SplatAsset->SplatData.Num() == 0) return;
+
+    // Capture data for the render thread lambda.
+    // We copy the array here on the game thread so the render thread
+    // never touches SplatAsset directly (it's a UObject, not thread-safe).
+    TArray<FGaussianSplatData> SplatsCopy = SplatAsset->SplatData;
+    FNDIGaussianSplatProxy* ProxyPtr = GetProxyAs<FNDIGaussianSplatProxy>();
+
+    ENQUEUE_RENDER_COMMAND(NiagaraGS_Upload)(
+        [ProxyPtr, SplatsCopy = MoveTemp(SplatsCopy)]
+        (FRHICommandListImmediate& RHICmdList) mutable
+        {
+            ProxyPtr->UploadData(SplatsCopy);
+        });
+}
+
+void UNiagaraGSDataInterface::PostLoad()
+{
+    Super::PostLoad();
+
+    // Asset is fully loaded by PostLoad time, so we can safely upload.
+    // This covers the case where a saved Niagara system is reopened
+    // with an already-assigned SplatAsset.
+    UploadToGPU();
+}
+
+#if WITH_EDITOR
+void UNiagaraGSDataInterface::PostEditChangeProperty(
+    FPropertyChangedEvent& PropertyChangedEvent)
+{
+    Super::PostEditChangeProperty(PropertyChangedEvent);
+
+    // Re-upload whenever the asset reference changes in the Details panel
+    if (PropertyChangedEvent.Property &&
+        PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(
+            UNiagaraGSDataInterface, SplatAsset))
+    {
+        UploadToGPU();
+    }
+}
+#endif
+
+// ── GetParameterDefinitionHLSL ────────────────────────────────────────────────
+// Niagara calls this once when compiling the emitter shader.
+// We append an #include of our .ush file — that file contains all
+// buffer declarations and function bodies with {DataInterfaceHLSLSymbol}
+// as a placeholder that Niagara replaces with a unique prefix.
+
+void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
+    const FNiagaraDataInterfaceGPUParamInfo& ParamInfo,
+    FString& OutHLSL)
+{
+    // The virtual path "/NiagaraGS/NiagaraGSDataInterface.ush" maps to
+    // Plugins/NiagaraGS/Shaders/NiagaraGSDataInterface.ush via the
+    // directory mapping we registered in StartupModule (Step 1).
+    OutHLSL += TEXT("#include \"/NiagaraGS/NiagaraGSDataInterface.ush\"\n");
+}
+
+// ── GetFunctionHLSL ───────────────────────────────────────────────────────────
+// Called for each function in GetFunctions().
+// We emit a call-forwarding stub that delegates to the function defined
+// in our .ush file, substituting the correct HLSL symbol prefix.
+// The stub signature must exactly match what GetFunctions() declared.
+
+bool UNiagaraGSDataInterface::GetFunctionHLSL(
+    const FNiagaraDataInterfaceGPUParamInfo& ParamInfo,
+    const FNiagaraDataInterfaceGeneratedFunction& FunctionInfo,
+    int                                           FunctionInstanceIndex,
+    FString& OutHLSL)
+{
+    const FString& Sym = ParamInfo.DataInterfaceHLSLSymbol;
+
+    // ── GetSplatCount ──────────────────────────────────────────────
+    if (FunctionInfo.DefinitionName == Name_GetSplatCount)
+    {
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(out int OutCount)\n"
+            "{\n"
+            "    %s_GetSplatCount(OutCount);\n"
+            "}\n"),
+            *FunctionInfo.InstanceName, *Sym);
+        return true;
+    }
+
+    // ── GetSplatPosition ───────────────────────────────────────────
+    if (FunctionInfo.DefinitionName == Name_GetSplatPosition)
+    {
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, out float3 OutPosition)\n"
+            "{\n"
+            "    %s_GetSplatPosition(Index, OutPosition);\n"
+            "}\n"),
+            *FunctionInfo.InstanceName, *Sym);
+        return true;
+    }
+
+    // ── GetSplatScale ──────────────────────────────────────────────
+    if (FunctionInfo.DefinitionName == Name_GetSplatScale)
+    {
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, out float3 OutScale)\n"
+            "{\n"
+            "    %s_GetSplatScale(Index, OutScale);\n"
+            "}\n"),
+            *FunctionInfo.InstanceName, *Sym);
+        return true;
+    }
+
+    // ── GetSplatOrientation ────────────────────────────────────────
+    if (FunctionInfo.DefinitionName == Name_GetSplatOrientation)
+    {
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index,"
+            " out float OutQX, out float OutQY,"
+            " out float OutQZ, out float OutQW)\n"
+            "{\n"
+            "    %s_GetSplatOrientation(Index,"
+            " OutQX, OutQY, OutQZ, OutQW);\n"
+            "}\n"),
+            *FunctionInfo.InstanceName, *Sym);
+        return true;
+    }
+
+    // ── GetSplatColor ──────────────────────────────────────────────
+    if (FunctionInfo.DefinitionName == Name_GetSplatColor)
+    {
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, out float3 OutColor)\n"
+            "{\n"
+            "    %s_GetSplatColor(Index, OutColor);\n"
+            "}\n"),
+            *FunctionInfo.InstanceName, *Sym);
+        return true;
+    }
+
+    // ── GetSplatOpacity ────────────────────────────────────────────
+    if (FunctionInfo.DefinitionName == Name_GetSplatOpacity)
+    {
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, out float OutOpacity)\n"
+            "{\n"
+            "    %s_GetSplatOpacity(Index, OutOpacity);\n"
+            "}\n"),
+            *FunctionInfo.InstanceName, *Sym);
+        return true;
+    }
+
+    return false;
+}
+
+// ── BuildShaderParameters ─────────────────────────────────────────────────────
+// Tells Niagara the memory layout of our parameter struct so it can
+// allocate the right amount of space in the shader parameter buffer.
+
+void UNiagaraGSDataInterface::BuildShaderParameters(
+    FNiagaraShaderParametersBuilder& ShaderParametersBuilder) const
+{
+    ShaderParametersBuilder.AddNestedStruct<FNiagaraGSShaderParameters>();
+}
+
+// ── SetShaderParameters ───────────────────────────────────────────────────────
+// Called every frame on the render thread before Niagara dispatches
+// the GPU simulation compute shader.
+// We bind our GPU buffers into the shader parameter struct slots.
+
+void UNiagaraGSDataInterface::SetShaderParameters(
+    const FNiagaraDataInterfaceSetShaderParametersContext& Context) const
+{
+    // Fix: Renamed local reference from Proxy to SplatProxy to avoid hiding the class member
+    FNDIGaussianSplatProxy& SplatProxy =
+        Context.GetProxy<FNDIGaussianSplatProxy>();
+
+    FNiagaraGSShaderParameters* Params =
+        Context.GetParameterNestedStruct<FNiagaraGSShaderParameters>();
+
+    if (!Params) return;
+
+    if (SplatProxy.bBuffersReady)
+    {
+        Params->SplatCount = SplatProxy.SplatCount;
+        Params->Positions = SplatProxy.PositionsBuffer.SRV;
+        Params->Scales = SplatProxy.ScalesBuffer.SRV;
+        Params->Rotations = SplatProxy.RotationsBuffer.SRV;
+        Params->ColorOpacity = SplatProxy.ColorOpacityBuffer.SRV;
+    }
+    else
+    {
+        // Buffers not ready yet — bind zero count so the shader
+        // safely skips all reads rather than reading garbage memory
+        Params->SplatCount = 0;
+        Params->Positions = nullptr;
+        Params->Scales = nullptr;
+        Params->Rotations = nullptr;
+        Params->ColorOpacity = nullptr;
     }
 }

@@ -17,6 +17,7 @@ public class NiagaraGS : ModuleRules
             "Projects",
             "InputCore",
             "UnrealEd",   // For FAssetImportInfo, which we use to track source .ply files
+            "Niagara",
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]

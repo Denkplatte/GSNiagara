@@ -5,6 +5,7 @@
 #include "RHIResources.h"
 #include "RenderResource.h"
 #include "NiagaraDataInterfaceBase.h"
+#include "NiagaraDataInterfaceRW.h"
 #include "GaussianSplatData.h"
 
 // ── Per-splat GPU layout ──────────────────────────────────────────────────────
