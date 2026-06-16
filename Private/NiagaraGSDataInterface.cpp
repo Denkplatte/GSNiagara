@@ -74,6 +74,7 @@ void UNiagaraGSDataInterface::GetFunctions(
         {
             return FNiagaraVariable(
                 FNiagaraTypeDefinition(GetClass()), TEXT("GaussianSplatDI"));
+
         };
 
     // ── GetSplatCount ──────────────────────────────────────────────
@@ -84,8 +85,11 @@ void UNiagaraGSDataInterface::GetFunctions(
         FNiagaraFunctionSignature Sig;
         Sig.Name = Name_GetSplatCount;
         Sig.bMemberFunction = true;
-        Sig.bRequiresContext = false;
-        Sig.Inputs.Add(NDISelf());
+        Sig.bRequiresContext = true;   // ← was false, this is the fix
+        Sig.bSupportsCPU = true;
+        Sig.bSupportsGPU = true;
+        Sig.Inputs.Add(FNiagaraVariable(
+            FNiagaraTypeDefinition(GetClass()), TEXT("GaussianSplatDI")));
         Sig.Outputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Count")));
         OutFunctions.Add(Sig);
@@ -100,6 +104,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatPosition;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;   // ← ADD THIS
+        Sig.bSupportsGPU = true;   // ← ADD THIS (or false if CPU-only)
         Sig.Inputs.Add(NDISelf());
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
@@ -117,6 +123,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatScale;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;   // ← ADD THIS
+        Sig.bSupportsGPU = true;   // ← ADD THIS (or false if CPU-only)
         Sig.Inputs.Add(NDISelf());
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
@@ -136,6 +144,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatOrientation;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;   // ← ADD THIS
+        Sig.bSupportsGPU = true;   // ← ADD THIS (or false if CPU-only)
         Sig.Inputs.Add(NDISelf());
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
@@ -159,6 +169,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatColor;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;   // ← ADD THIS
+        Sig.bSupportsGPU = true;   // ← ADD THIS (or false if CPU-only)
         Sig.Inputs.Add(NDISelf());
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
@@ -176,6 +188,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatOpacity;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;   // ← ADD THIS
+        Sig.bSupportsGPU = true;   // ← ADD THIS (or false if CPU-only)
         Sig.Inputs.Add(NDISelf());
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
@@ -242,13 +256,11 @@ void UNiagaraGSDataInterface::GetVMExternalFunction(
 void UNiagaraGSDataInterface::GetSplatCount(
     FVectorVMExternalFunctionContext& Context)
 {
-    VectorVM::FUserPtrHandler<UNiagaraGSDataInterface> InstData(Context);
+    FNDIInputParam<int32> SelfParam(Context);   // consume self-ref register
     FNDIOutputParam<int32> OutCount(Context);
 
     const int32 Count = GetSplatCount();
-    const int32 NumInstances = Context.GetNumInstances();
-
-    for (int32 i = 0; i < NumInstances; ++i)
+    for (int32 i = 0; i < Context.GetNumInstances(); ++i)
     {
         OutCount.SetAndAdvance(Count);
     }
@@ -257,7 +269,7 @@ void UNiagaraGSDataInterface::GetSplatCount(
 void UNiagaraGSDataInterface::GetSplatPosition(
     FVectorVMExternalFunctionContext& Context)
 {
-    VectorVM::FUserPtrHandler<UNiagaraGSDataInterface> InstData(Context);
+    FNDIInputParam<int32>  SelfParam(Context);  // consume self-ref register
     FNDIInputParam<int32>  InIndex(Context);
     FNDIOutputParam<float> OutX(Context);
     FNDIOutputParam<float> OutY(Context);
@@ -266,11 +278,9 @@ void UNiagaraGSDataInterface::GetSplatPosition(
     const TArray<FGaussianSplatData>* Splats =
         (SplatAsset ? &SplatAsset->SplatData : nullptr);
 
-    const int32 NumInstances = Context.GetNumInstances();
-    for (int32 i = 0; i < NumInstances; ++i)
+    for (int32 i = 0; i < Context.GetNumInstances(); ++i)
     {
         const int32 Index = InIndex.GetAndAdvance();
-
         if (Splats && Splats->IsValidIndex(Index))
         {
             const FVector3f& Pos = (*Splats)[Index].Position;
@@ -280,17 +290,16 @@ void UNiagaraGSDataInterface::GetSplatPosition(
         }
         else
         {
-            OutX.SetAndAdvance(0.0f);
-            OutY.SetAndAdvance(0.0f);
-            OutZ.SetAndAdvance(0.0f);
+            OutX.SetAndAdvance(0.f);
+            OutY.SetAndAdvance(0.f);
+            OutZ.SetAndAdvance(0.f);
         }
     }
 }
-
 void UNiagaraGSDataInterface::GetSplatScale(
     FVectorVMExternalFunctionContext& Context)
 {
-    VectorVM::FUserPtrHandler<UNiagaraGSDataInterface> InstData(Context);
+    FNDIInputParam<int32>  SelfParam(Context);  // consume self-ref register
     FNDIInputParam<int32>  InIndex(Context);
     FNDIOutputParam<float> OutX(Context);
     FNDIOutputParam<float> OutY(Context);
@@ -323,7 +332,7 @@ void UNiagaraGSDataInterface::GetSplatScale(
 void UNiagaraGSDataInterface::GetSplatOrientation(
     FVectorVMExternalFunctionContext& Context)
 {
-    VectorVM::FUserPtrHandler<UNiagaraGSDataInterface> InstData(Context);
+    FNDIInputParam<int32>  SelfParam(Context);  // consume self-ref register
     FNDIInputParam<int32>  InIndex(Context);
     FNDIOutputParam<float> OutQX(Context);
     FNDIOutputParam<float> OutQY(Context);
@@ -359,7 +368,7 @@ void UNiagaraGSDataInterface::GetSplatOrientation(
 void UNiagaraGSDataInterface::GetSplatColor(
     FVectorVMExternalFunctionContext& Context)
 {
-    VectorVM::FUserPtrHandler<UNiagaraGSDataInterface> InstData(Context);
+    FNDIInputParam<int32>  SelfParam(Context);  // consume self-ref register
     FNDIInputParam<int32>  InIndex(Context);
     FNDIOutputParam<float> OutR(Context);
     FNDIOutputParam<float> OutG(Context);
@@ -392,7 +401,7 @@ void UNiagaraGSDataInterface::GetSplatColor(
 void UNiagaraGSDataInterface::GetSplatOpacity(
     FVectorVMExternalFunctionContext& Context)
 {
-    VectorVM::FUserPtrHandler<UNiagaraGSDataInterface> InstData(Context);
+    FNDIInputParam<int32>  SelfParam(Context);  // consume self-ref register
     FNDIInputParam<int32>  InIndex(Context);
     FNDIOutputParam<float> OutOpacity(Context);
 
@@ -415,93 +424,7 @@ void UNiagaraGSDataInterface::GetSplatOpacity(
     }
 }
 
-/*void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats)
-{
-    const int32 Count = Splats.Num();
-    if (Count == 0)
-    {
-        ReleaseBuffers();
-        return;
-    }
 
-    // 1. Pack CPU data
-    TArray<FVector4f> PackedPositions;
-    TArray<FVector4f> PackedScales;
-    TArray<FVector4f> PackedRotations;
-    TArray<FVector4f> PackedColorOpacity;
-
-    PackedPositions.SetNumUninitialized(Count);
-    PackedScales.SetNumUninitialized(Count);
-    PackedRotations.SetNumUninitialized(Count);
-    PackedColorOpacity.SetNumUninitialized(Count);
-
-    for (int32 i = 0; i < Count; ++i)
-    {
-        const FGaussianSplatData& S = Splats[i];
-        PackedPositions[i] = FVector4f(S.Position.X, S.Position.Y, S.Position.Z, 0.0f);
-        PackedScales[i] = FVector4f(S.Scale.X, S.Scale.Y, S.Scale.Z, 0.0f);
-        PackedRotations[i] = FVector4f(S.Orientation.X, S.Orientation.Y, S.Orientation.Z, S.Orientation.W);
-        PackedColorOpacity[i] = FVector4f(S.Color.X, S.Color.Y, S.Color.Z, S.Opacity);
-    }
-
-    // 2. Safely defer buffer creation and allocation to the Render Thread
-    struct FBufferInitData
-    {
-        TArray<FVector4f> Data;
-        FNiagaraGSSplatBuffer* TargetBuffer;
-        const TCHAR* DebugName;
-    };
-
-    // Construct an array of references to fill asynchronously 
-    TSharedPtr<TArray<FBufferInitData>, ESPMode::ThreadSafe> InitArray = MakeShared<TArray<FBufferInitData>, ESPMode::ThreadSafe>();
-    InitArray->Add({ MoveTemp(PackedPositions), &PositionsBuffer, TEXT("GS_Positions") });
-    InitArray->Add({ MoveTemp(PackedScales), &ScalesBuffer, TEXT("GS_Scales") });
-    InitArray->Add({ MoveTemp(PackedRotations), &RotationsBuffer, TEXT("GS_Rotations") });
-    InitArray->Add({ MoveTemp(PackedColorOpacity), &ColorOpacityBuffer, TEXT("GS_ColorOpacity") });
-
-    ReleaseBuffers();
-
-    // Enqueue the work to run on the Render Thread
-    ENQUEUE_RENDER_COMMAND(FNiagaraGSUploadBufferData)(
-        [InitArray](FRHICommandListImmediate& RHICmdList) // UE provides RHICmdList automatically here
-        {
-            for (const FBufferInitData& InitData : *InitArray)
-            {
-                if (InitData.Data.Num() == 0) continue;
-
-                const int32 BufferSize = InitData.Data.Num() * sizeof(FVector4f);
-
-                // 1. Descriptor setup (UE 5.6 chained syntax)
-                FRHIBufferCreateDesc CreateInfo = FRHIBufferCreateDesc::Create(InitData.DebugName, EBufferUsageFlags::Static | EBufferUsageFlags::ShaderResource)
-                    .SetSize(BufferSize)
-                    .SetStride(sizeof(FVector4f))
-                    .SetInitialState(ERHIAccess::Unknown);
-
-                // 2. Create the buffer using the render thread's command list
-                InitData.TargetBuffer->Buffer = RHICmdList.CreateBuffer(CreateInfo);
-
-                // 3. Lock, write, and unlock
-                void* Dest = RHICmdList.LockBuffer(InitData.TargetBuffer->Buffer, 0, BufferSize, RLM_WriteOnly);
-                FMemory::Memcpy(Dest, InitData.Data.GetData(), BufferSize);
-                RHICmdList.UnlockBuffer(InitData.TargetBuffer->Buffer);
-
-                // 4. Generate the Shader Resource View
-                // 4. Generate the Shader Resource View directly without a descriptor
-               // 4. Generate the Shader Resource View via explicit initializer
-                FShaderResourceViewInitializer ViewInitializer(InitData.TargetBuffer->Buffer, PF_A32B32G32R32F);
-                InitData.TargetBuffer->SRV = RHICmdList.CreateShaderResourceView(ViewInitializer);
-
-
-            }
-        });
-
-    SplatCount = Count;
-    bBuffersReady = true;
-
-    const int32 TotalBytes = Count * sizeof(FVector4f) * 4;
-    UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Enqueued %d splats for GPU upload (%d MB)"), Count, TotalBytes / (1024 * 1024));
-}
-*/
 void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats)
 {
     // Must be called on the render thread (via ENQUEUE_RENDER_COMMAND in UploadToGPU)
@@ -588,7 +511,11 @@ void UNiagaraGSDataInterface::PostInitProperties()
             FNiagaraTypeDefinition(GetClass()), DIFlags);
     }
 
-    Proxy = MakeUnique<FNDIGaussianSplatProxy>();
+    // Always create the proxy, not just for CDO
+    if (!HasAnyFlags(RF_ClassDefaultObject))
+    {
+        Proxy = MakeUnique<FNDIGaussianSplatProxy>();
+    }
 }
 
 void UNiagaraGSDataInterface::UploadToGPU()

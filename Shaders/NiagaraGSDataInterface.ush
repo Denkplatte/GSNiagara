@@ -23,36 +23,36 @@ void {DataInterfaceHLSLSymbol}_GetSplatCount(out int OutCount)
 void {DataInterfaceHLSLSymbol}_GetSplatPosition(
     int Index, out float3 OutPosition)
 {
-    OutPosition = (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
-        ? {DataInterfaceHLSLSymbol}_Positions[Index].xyz
-        : float3(0, 0, 0);
+    OutPosition = float3(0, 0, 0);
+    if (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
+    {
+        OutPosition = {DataInterfaceHLSLSymbol}_Positions[Index].xyz;
+    }
 }
 
 // ── GetSplatScale ─────────────────────────────────────────────────────────────
 void {DataInterfaceHLSLSymbol}_GetSplatScale(
     int Index, out float3 OutScale)
 {
-    OutScale = (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
-        ? {DataInterfaceHLSLSymbol}_Scales[Index].xyz
-        : float3(1, 1, 1);
+    OutScale = float3(1, 1, 1);
+    if (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
+    {
+        OutScale = {DataInterfaceHLSLSymbol}_Scales[Index].xyz;
+    }
 }
 
 // ── GetSplatOrientation ───────────────────────────────────────────────────────
-// Returns quaternion components separately because Niagara scratch pads
-// don't have a native quat type — the scratch pad reassembles them.
 void {DataInterfaceHLSLSymbol}_GetSplatOrientation(
-    int Index,
-    out float OutQX, out float OutQY,
-    out float OutQZ, out float OutQW)
+    int Index, out float OutQX, out float OutQY, out float OutQZ, out float OutQW)
 {
+    OutQX = 0; OutQY = 0; OutQZ = 0; OutQW = 1;
     if (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
     {
-        float4 Q = {DataInterfaceHLSLSymbol}_Rotations[Index];
-        OutQX = Q.x; OutQY = Q.y; OutQZ = Q.z; OutQW = Q.w;
-    }
-    else
-    {
-        OutQX = 0; OutQY = 0; OutQZ = 0; OutQW = 1;
+        float4 Q = { DataInterfaceHLSLSymbol }_Rotations[ Index];
+        OutQX = Q.x;
+        OutQY = Q.y;
+        OutQZ = Q.z;
+        OutQW = Q.w;
     }
 }
 
@@ -60,16 +60,20 @@ void {DataInterfaceHLSLSymbol}_GetSplatOrientation(
 void {DataInterfaceHLSLSymbol}_GetSplatColor(
     int Index, out float3 OutColor)
 {
-    OutColor = (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
-        ? {DataInterfaceHLSLSymbol}_ColorOpacity[Index].xyz
-        : float3(0.5, 0.5, 0.5);
+    OutColor = float3(0.5, 0.5, 0.5);
+    if (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
+    {
+        OutColor = {DataInterfaceHLSLSymbol}_ColorOpacity[Index].xyz;
+    }
 }
 
 // ── GetSplatOpacity ───────────────────────────────────────────────────────────
 void {DataInterfaceHLSLSymbol}_GetSplatOpacity(
     int Index, out float OutOpacity)
 {
-    OutOpacity = (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
-        ? {DataInterfaceHLSLSymbol}_ColorOpacity[Index].w
-        : 0.0;
+    OutOpacity = 0.0;
+    if (Index >= 0 && Index < {DataInterfaceHLSLSymbol}_SplatCount)
+    {
+        OutOpacity = {DataInterfaceHLSLSymbol}_ColorOpacity[Index].w;
+    }
 }
