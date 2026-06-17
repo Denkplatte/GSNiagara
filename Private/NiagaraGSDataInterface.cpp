@@ -388,12 +388,13 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
         "}\n\n"),
         *S, *S, *S);
 
-    // 6. GetSplatColor
+    // GetSplatColor — returns float4 to match Niagara's FLinearColor
     OutHLSL += FString::Printf(TEXT(
-        "void %s_GetSplatColor(int Index, out float3 OutColor)\n"
+        "void %s_GetSplatColor(int Index, out float4 OutColor)\n"
         "{\n"
         "    OutColor = (Index >= 0 && Index < %s_SplatCount)\n"
-        "        ? %s_ColorOpacity[Index].xyz : float3(0.5,0.5,0.5);\n"
+        "        ? float4(%s_ColorOpacity[Index].xyz, 1.0)\n"
+        "        : float4(0.5, 0.5, 0.5, 1.0);\n"
         "}\n\n"),
         *S, *S, *S);
 
@@ -455,7 +456,7 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
     if (FunctionInfo.DefinitionName == Name_GetSplatColor)
     {
         OutHLSL += FString::Printf(TEXT(
-            "void %s(int Index, out float3 OutColor)\n{\n"
+            "void %s(int Index, out float4 OutColor)\n{\n"
             "    %s_GetSplatColor(Index, OutColor);\n"
             "}\n"),
             *N, *S);
