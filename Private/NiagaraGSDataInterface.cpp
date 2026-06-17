@@ -306,72 +306,101 @@ void UNiagaraGSDataInterface::PostEditChangeProperty(FPropertyChangedEvent& Prop
     }
 }
 #endif
-void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
-    const FNiagaraDataInterfaceGPUParamInfo& ParamInfo,
-    FString& OutHLSL)
+
+void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(const FNiagaraDataInterfaceGPUParamInfo& ParamInfo, FString& OutHLSL)
 {
-    const FString& Sym = ParamInfo.DataInterfaceHLSLSymbol;
+    // URGENT COMPILER FIX:
+    // To prevent Niagara shader compilation freezes/hangs, we define the helper functions 
+    // dynamically as a C++ string here, instead of using a static #include file.
+    // Why: Niagara's {Parameter} regex-replacement ONLY runs on the dynamic C++ string returned 
+    // by this function. It does NOT crawl static .ush '#include' files pre-compilation. 
+    // If the .ush file is included, DXC receives un-replaced curly braces (e.g. {Parameter}_Positions),
+    // which results in catastrophic compiler loops/crashes in the editor.
+    // We also omit redundant type declarations for our parameters because BuildShaderParameters() 
+    // already automatically exposes flattened parameter bindings to the shader context!
+    //
+    // CRITICAL: We must manually replace "{Parameter}" in our custom C++ dynamic string with 
+    // ParamInfo.DataInterfaceHLSLSymbol, as Niagara's translation pass does not automatically 
+    // replace braces inside raw strings appended to OutHLSL from C++.
 
-    // ── Buffer declarations ──────────────────────────────────────────
-    OutHLSL += FString::Printf(TEXT(
-        "int            %s_SplatCount;\n"
-        "Buffer<float4> %s_Positions;\n"
-        "Buffer<float4> %s_Scales;\n"
-        "Buffer<float4> %s_Rotations;\n"
-        "Buffer<float4> %s_ColorOpacity;\n"
-    ), *Sym, *Sym, *Sym, *Sym, *Sym);
+    const FString Symbol = ParamInfo.DataInterfaceHLSLSymbol;
 
-    // ── Helper functions (formerly in the .ush) ──────────────────────
-    OutHLSL += FString::Printf(TEXT(
-        "void %s_GetSplatCount(out int OutCount)\n"
-        "{\n"
-        "    OutCount = %s_SplatCount;\n"
-        "}\n"
-        "void %s_GetSplatPosition(int Index, out float3 OutPosition)\n"
-        "{\n"
-        "    OutPosition = (Index >= 0 && Index < %s_SplatCount)\n"
-        "        ? %s_Positions[Index].xyz : float3(0,0,0);\n"
-        "}\n"
-        "void %s_GetSplatScale(int Index, out float3 OutScale)\n"
-        "{\n"
-        "    OutScale = (Index >= 0 && Index < %s_SplatCount)\n"
-        "        ? %s_Scales[Index].xyz : float3(1,1,1);\n"
-        "}\n"
-        "void %s_GetSplatOrientation(int Index,"
-        " out float OutQX, out float OutQY, out float OutQZ, out float OutQW)\n"
-        "{\n"
-        "    if (Index >= 0 && Index < %s_SplatCount)\n"
-        "    {\n"
-        "        float4 Q = %s_Rotations[Index];\n"
-        "        OutQX = Q.x; OutQY = Q.y; OutQZ = Q.z; OutQW = Q.w;\n"
-        "    }\n"
-        "    else { OutQX = 0; OutQY = 0; OutQZ = 0; OutQW = 1; }\n"
-        "}\n"
-        "void %s_GetSplatColor(int Index, out float3 OutColor)\n"
-        "{\n"
-        "    OutColor = (Index >= 0 && Index < %s_SplatCount)\n"
-        "        ? %s_ColorOpacity[Index].xyz : float3(0.5,0.5,0.5);\n"
-        "}\n"
-        "void %s_GetSplatOpacity(int Index, out float OutOpacity)\n"
-        "{\n"
-        "    OutOpacity = (Index >= 0 && Index < %s_SplatCount)\n"
-        "        ? %s_ColorOpacity[Index].w : 0.0;\n"
-        "}\n"
-    ),
-        *Sym,              // GetSplatCount body
-        *Sym,
-        *Sym,              // GetSplatPosition
-        *Sym, *Sym,
-        *Sym,              // GetSplatScale
-        *Sym, *Sym,
-        *Sym,              // GetSplatOrientation
-        *Sym, *Sym,
-        *Sym,              // GetSplatColor
-        *Sym, *Sym,
-        *Sym,              // GetSplatOpacity
-        *Sym, *Sym
-    );
+    FString TemplateCode =
+        TEXT("void {Parameter}_GetSplatCount(out int OutCount)\n")
+        TEXT("{\n")
+        TEXT("    OutCount = {Parameter}.SplatCount;\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatPosition(int Index, out float3 OutPosition)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        OutPosition = {Parameter}.Positions[Index].xyz;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("    {\n")
+        TEXT("        OutPosition = float3(0.0f, 0.0f, 0.0f);\n")
+        TEXT("    }\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatScale(int Index, out float3 OutScale)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        OutScale = {Parameter}.Scales[Index].xyz;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("    {\n")
+        TEXT("        OutScale = float3(1.0f, 1.0f, 1.0f);\n")
+        TEXT("    }\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatOrientation(int Index, out float OutQX, out float OutQY, out float OutQZ, out float OutQW)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        float4 Q = {Parameter}.Rotations[Index];\n")
+        TEXT("        OutQX = Q.x;\n")
+        TEXT("        OutQY = Q.y;\n")
+        TEXT("        OutQZ = Q.z;\n")
+        TEXT("        OutQW = Q.w;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("    {\n")
+        TEXT("        OutQX = 0.0f;\n")
+        TEXT("        OutQY = 0.0f;\n")
+        TEXT("        OutQZ = 0.0f;\n")
+        TEXT("        OutQW = 1.0f;\n")
+        TEXT("    }\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatColor(int Index, out float3 OutColor)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        OutColor = {Parameter}.ColorOpacity[Index].xyz;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("        OutColor = float3(0.5f, 0.5f, 0.5f);\n")
+        TEXT("    }\n")
+        TEXT("}\n\n")
+
+        TEXT("void {Parameter}_GetSplatOpacity(int Index, out float OutOpacity)\n")
+        TEXT("{\n")
+        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
+        TEXT("    {\n")
+        TEXT("        OutOpacity = {Parameter}.ColorOpacity[Index].w;\n")
+        TEXT("    }\n")
+        TEXT("    else\n")
+        TEXT("    {\n")
+        TEXT("        OutOpacity = 0.0f;\n")
+        TEXT("    }\n")
+        TEXT("}\n\n");
+
+    TemplateCode.ReplaceInline(TEXT("{Parameter}"), *Symbol);
+    OutHLSL += TemplateCode;
 }
+
 
 bool UNiagaraGSDataInterface::GetFunctionHLSL(
     const FNiagaraDataInterfaceGPUParamInfo& ParamInfo,
@@ -413,19 +442,15 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
     }
     return false;
 }
-//void UNiagaraGSDataInterface::BuildShaderParameters(FNiagaraShaderParametersBuilder& ShaderParametersBuilder) const
-//{
- //   ShaderParametersBuilder.AddNestedStruct<FNiagaraGSShaderParameters>();
-//}
+
+void UNiagaraGSDataInterface::BuildShaderParameters(FNiagaraShaderParametersBuilder& ShaderParametersBuilder) const
+{
+    ShaderParametersBuilder.AddNestedStruct<FNiagaraGSShaderParameters>();
+}
 
 void UNiagaraGSDataInterface::SetShaderParameters(const FNiagaraDataInterfaceSetShaderParametersContext& Context) const
 {
     FNDIGaussianSplatProxy& SplatProxy = Context.GetProxy<FNDIGaussianSplatProxy>();
-
-    // URGENT CRASH FIX: Guarantee the fallback buffer is initialized on the render thread 
-    // before any parameters are retrieved/bound. This prevents null SRV bindings and editor crashes.
-    SplatProxy.InitFallbackBuffer();
-
     FNiagaraGSShaderParameters* Params = Context.GetParameterNestedStruct<FNiagaraGSShaderParameters>();
 
     if (!Params) return;
@@ -440,43 +465,16 @@ void UNiagaraGSDataInterface::SetShaderParameters(const FNiagaraDataInterfaceSet
     }
     else
     {
-        FRHIShaderResourceView* Fallback = SplatProxy.FallbackBuffer.SRV;
         Params->SplatCount = 0;
-        Params->Positions = Fallback;
-        Params->Scales = Fallback;
-        Params->Rotations = Fallback;
-        Params->ColorOpacity = Fallback;
+        Params->Positions = nullptr;
+        Params->Scales = nullptr;
+        Params->Rotations = nullptr;
+        Params->ColorOpacity = nullptr;
     }
-}
-
-void FNDIGaussianSplatProxy::InitFallbackBuffer()
-{
-    if (FallbackBuffer.IsValid()) return;
-
-    const int32 BufferSize = sizeof(FVector4f);
-    FVector4f ZeroData(0.f, 0.f, 0.f, 0.f);
-
-    FRHIBufferCreateDesc CreateInfo = FRHIBufferCreateDesc::Create(
-        TEXT("GS_Fallback"),
-        EBufferUsageFlags::Static | EBufferUsageFlags::ShaderResource)
-        .SetSize(BufferSize)
-        .SetStride(sizeof(FVector4f))
-        .SetInitialState(ERHIAccess::SRVCompute);
-
-    FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-
-    FallbackBuffer.Buffer = RHICmdList.CreateBuffer(CreateInfo);
-    void* Dest = RHICmdList.LockBuffer(FallbackBuffer.Buffer, 0, BufferSize, RLM_WriteOnly);
-    FMemory::Memcpy(Dest, &ZeroData, BufferSize);
-    RHICmdList.UnlockBuffer(FallbackBuffer.Buffer);
-
-    FShaderResourceViewInitializer ViewInit(FallbackBuffer.Buffer, PF_A32B32G32R32F);
-    FallbackBuffer.SRV = RHICmdList.CreateShaderResourceView(ViewInit);
 }
 
 void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats)
 {
-    InitFallbackBuffer();
     check(IsInRenderingThread());
     const int32 Count = Splats.Num();
     ReleaseBuffers();
