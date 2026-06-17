@@ -335,106 +335,76 @@ void UNiagaraGSDataInterface::PostEditChangeProperty(FPropertyChangedEvent& Prop
 }
 #endif
 
-void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(const FNiagaraDataInterfaceGPUParamInfo& ParamInfo, FString& OutHLSL)
+void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
+    const FNiagaraDataInterfaceGPUParamInfo& ParamInfo,
+    FString& OutHLSL)
 {
-    // URGENT COMPILER FIX:
-    // To prevent Niagara shader compilation freezes/hangs, we define the helper functions 
-    // dynamically as a C++ string here, instead of using a static #include file.
-    // Why: Niagara's {Parameter} regex-replacement ONLY runs on the dynamic C++ string returned 
-    // by this function. It does NOT crawl static .ush '#include' files pre-compilation. 
-    // If the .ush file is included, DXC receives un-replaced curly braces (e.g. {Parameter}_Positions),
-    // which results in catastrophic compiler loops/crashes in the editor.
-    // We also omit redundant type declarations for our parameters because BuildShaderParameters() 
-    // already automatically exposes flattened parameter bindings to the shader context!
-    //
-    // CRITICAL: We must manually replace "{Parameter}" in our custom C++ dynamic string with 
-    // ParamInfo.DataInterfaceHLSLSymbol, as Niagara's translation pass does not automatically 
-    // replace braces inside raw strings appended to OutHLSL from C++.
-    //
-    // VALUE VS RESOURCE ACCESS RULE:
-    // 1. SplatCount is a value-type parameter in FNiagaraGSShaderParameters, meaning it is bundled 
-    //    into a Constant Buffer. We access it using a DOT: {Parameter}.SplatCount
-    // 2. Positions, Scales, Rotations, ColorOpacity are SRV resource-type parameters. Resources 
-    //    cannot reside inside a constant buffer struct, so the shader parameters builder flattens 
-    //    them to the global shader scope by joining the symbol with an UNDERSCORE: {Parameter}_Positions
+    const FString& S = ParamInfo.DataInterfaceHLSLSymbol;
 
-    const FString Symbol = ParamInfo.DataInterfaceHLSLSymbol;
+    // 1. Variable declarations — must match SHADER_PARAMETER member names exactly
+    OutHLSL += FString::Printf(TEXT("int %s_SplatCount;\n"), *S);
+    OutHLSL += FString::Printf(TEXT("Buffer<float4> %s_Positions;\n"), *S);
+    OutHLSL += FString::Printf(TEXT("Buffer<float4> %s_Scales;\n"), *S);
+    OutHLSL += FString::Printf(TEXT("Buffer<float4> %s_Rotations;\n"), *S);
+    OutHLSL += FString::Printf(TEXT("Buffer<float4> %s_ColorOpacity;\n\n"), *S);
 
-    FString TemplateCode =
-        TEXT("void {Parameter}_GetSplatCount(out int OutCount)\n")
-        TEXT("{\n")
-        TEXT("    OutCount = {Parameter}.SplatCount;\n")
-        TEXT("}\n\n")
+    // 2. GetSplatCount
+    OutHLSL += FString::Printf(TEXT(
+        "void %s_GetSplatCount(out int OutCount)\n"
+        "{\n"
+        "    OutCount = %s_SplatCount;\n"
+        "}\n\n"),
+        *S, *S);
 
-        TEXT("void {Parameter}_GetSplatPosition(int Index, out float3 OutPosition)\n")
-        TEXT("{\n")
-        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
-        TEXT("    {\n")
-        TEXT("        OutPosition = {Parameter}_Positions[Index].xyz;\n")
-        TEXT("    }\n")
-        TEXT("    else\n")
-        TEXT("    {\n")
-        TEXT("        OutPosition = float3(0.0f, 0.0f, 0.0f);\n")
-        TEXT("    }\n")
-        TEXT("}\n\n")
+    // 3. GetSplatPosition
+    OutHLSL += FString::Printf(TEXT(
+        "void %s_GetSplatPosition(int Index, out float3 OutPosition)\n"
+        "{\n"
+        "    OutPosition = (Index >= 0 && Index < %s_SplatCount)\n"
+        "        ? %s_Positions[Index].xyz : float3(0,0,0);\n"
+        "}\n\n"),
+        *S, *S, *S);
 
-        TEXT("void {Parameter}_GetSplatScale(int Index, out float3 OutScale)\n")
-        TEXT("{\n")
-        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
-        TEXT("    {\n")
-        TEXT("        OutScale = {Parameter}_Scales[Index].xyz;\n")
-        TEXT("    }\n")
-        TEXT("    else\n")
-        TEXT("    {\n")
-        TEXT("        OutScale = float3(1.0f, 1.0f, 1.0f);\n")
-        TEXT("    }\n")
-        TEXT("}\n\n")
+    // 4. GetSplatScale
+    OutHLSL += FString::Printf(TEXT(
+        "void %s_GetSplatScale(int Index, out float3 OutScale)\n"
+        "{\n"
+        "    OutScale = (Index >= 0 && Index < %s_SplatCount)\n"
+        "        ? %s_Scales[Index].xyz : float3(1,1,1);\n"
+        "}\n\n"),
+        *S, *S, *S);
 
-        TEXT("void {Parameter}_GetSplatOrientation(int Index, out float OutQX, out float OutQY, out float OutQZ, out float OutQW)\n")
-        TEXT("{\n")
-        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
-        TEXT("    {\n")
-        TEXT("        float4 Q = {Parameter}_Rotations[Index];\n")
-        TEXT("        OutQX = Q.x;\n")
-        TEXT("        OutQY = Q.y;\n")
-        TEXT("        OutQZ = Q.z;\n")
-        TEXT("        OutQW = Q.w;\n")
-        TEXT("    }\n")
-        TEXT("    else\n")
-        TEXT("    {\n")
-        TEXT("        OutQX = 0.0f;\n")
-        TEXT("        OutQY = 0.0f;\n")
-        TEXT("        OutQZ = 0.0f;\n")
-        TEXT("        OutQW = 1.0f;\n")
-        TEXT("    }\n")
-        TEXT("}\n\n")
+    // 5. GetSplatOrientation
+    OutHLSL += FString::Printf(TEXT(
+        "void %s_GetSplatOrientation(int Index,\n"
+        "    out float OutQX, out float OutQY, out float OutQZ, out float OutQW)\n"
+        "{\n"
+        "    if (Index >= 0 && Index < %s_SplatCount)\n"
+        "    {\n"
+        "        float4 Q = %s_Rotations[Index];\n"
+        "        OutQX = Q.x; OutQY = Q.y; OutQZ = Q.z; OutQW = Q.w;\n"
+        "    }\n"
+        "    else { OutQX = 0; OutQY = 0; OutQZ = 0; OutQW = 1; }\n"
+        "}\n\n"),
+        *S, *S, *S);
 
-        TEXT("void {Parameter}_GetSplatColor(int Index, out float4 OutColor)\n")
-        TEXT("{\n")
-        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
-        TEXT("    {\n")
-        TEXT("        OutColor = {Parameter}_ColorOpacity[Index];\n")
-        TEXT("    }\n")
-        TEXT("    else\n")
-        TEXT("    {\n")
-        TEXT("        OutColor = float4(0.5f, 0.5f, 0.5f, 1.0f);\n")
-        TEXT("    }\n")
-        TEXT("}\n\n")
+    // 6. GetSplatColor
+    OutHLSL += FString::Printf(TEXT(
+        "void %s_GetSplatColor(int Index, out float3 OutColor)\n"
+        "{\n"
+        "    OutColor = (Index >= 0 && Index < %s_SplatCount)\n"
+        "        ? %s_ColorOpacity[Index].xyz : float3(0.5,0.5,0.5);\n"
+        "}\n\n"),
+        *S, *S, *S);
 
-        TEXT("void {Parameter}_GetSplatOpacity(int Index, out float OutOpacity)\n")
-        TEXT("{\n")
-        TEXT("    if (Index >= 0 && Index < {Parameter}.SplatCount)\n")
-        TEXT("    {\n")
-        TEXT("        OutOpacity = {Parameter}_ColorOpacity[Index].w;\n")
-        TEXT("    }\n")
-        TEXT("    else\n")
-        TEXT("    {\n")
-        TEXT("        OutOpacity = 0.0f;\n")
-        TEXT("    }\n")
-        TEXT("}\n\n");
-
-    TemplateCode.ReplaceInline(TEXT("{Parameter}"), *Symbol);
-    OutHLSL += TemplateCode;
+    // 7. GetSplatOpacity
+    OutHLSL += FString::Printf(TEXT(
+        "void %s_GetSplatOpacity(int Index, out float OutOpacity)\n"
+        "{\n"
+        "    OutOpacity = (Index >= 0 && Index < %s_SplatCount)\n"
+        "        ? %s_ColorOpacity[Index].w : 0.0;\n"
+        "}\n\n"),
+        *S, *S, *S);
 }
 
 bool UNiagaraGSDataInterface::GetFunctionHLSL(
@@ -443,36 +413,61 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
     int FunctionInstanceIndex,
     FString& OutHLSL)
 {
-    const FString& Sym = ParamInfo.DataInterfaceHLSLSymbol;
+    const FString& S = ParamInfo.DataInterfaceHLSLSymbol;
+    const FString& N = FunctionInfo.InstanceName;
 
     if (FunctionInfo.DefinitionName == Name_GetSplatCount)
     {
-        OutHLSL += FString::Printf(TEXT("void %s(out int OutCount)\\n{\\n    %s_GetSplatCount(OutCount);\\n}\\n"), *FunctionInfo.InstanceName, *Sym);
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(out int OutCount)\n{\n"
+            "    %s_GetSplatCount(OutCount);\n"
+            "}\n"),
+            *N, *S);
         return true;
     }
     if (FunctionInfo.DefinitionName == Name_GetSplatPosition)
     {
-        OutHLSL += FString::Printf(TEXT("void %s(int Index, out float3 OutPosition)\\n{\\n    %s_GetSplatPosition(Index, OutPosition);\\n}\\n"), *FunctionInfo.InstanceName, *Sym);
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, out float3 OutPosition)\n{\n"
+            "    %s_GetSplatPosition(Index, OutPosition);\n"
+            "}\n"),
+            *N, *S);
         return true;
     }
     if (FunctionInfo.DefinitionName == Name_GetSplatScale)
     {
-        OutHLSL += FString::Printf(TEXT("void %s(int Index, out float3 OutScale)\\n{\\n    %s_GetSplatScale(Index, OutScale);\\n}\\n"), *FunctionInfo.InstanceName, *Sym);
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, out float3 OutScale)\n{\n"
+            "    %s_GetSplatScale(Index, OutScale);\n"
+            "}\n"),
+            *N, *S);
         return true;
     }
     if (FunctionInfo.DefinitionName == Name_GetSplatOrientation)
     {
-        OutHLSL += FString::Printf(TEXT("void %s(int Index, out float OutQX, out float OutQY, out float OutQZ, out float OutQW)\\n{\\n    %s_GetSplatOrientation(Index, OutQX, OutQY, OutQZ, OutQW);\\n}\\n"), *FunctionInfo.InstanceName, *Sym);
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, out float OutQX, out float OutQY, out float OutQZ, out float OutQW)\n{\n"
+            "    %s_GetSplatOrientation(Index, OutQX, OutQY, OutQZ, OutQW);\n"
+            "}\n"),
+            *N, *S);
         return true;
     }
     if (FunctionInfo.DefinitionName == Name_GetSplatColor)
     {
-        OutHLSL += FString::Printf(TEXT("void %s(int Index, out float4 OutColor)\\n{\\n    %s_GetSplatColor(Index, OutColor);\\n}\\n"), *FunctionInfo.InstanceName, *Sym);
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, out float3 OutColor)\n{\n"
+            "    %s_GetSplatColor(Index, OutColor);\n"
+            "}\n"),
+            *N, *S);
         return true;
     }
     if (FunctionInfo.DefinitionName == Name_GetSplatOpacity)
     {
-        OutHLSL += FString::Printf(TEXT("void %s(int Index, out float OutOpacity)\\n{\\n    %s_GetSplatOpacity(Index, OutOpacity);\\n}\\n"), *FunctionInfo.InstanceName, *Sym);
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, out float OutOpacity)\n{\n"
+            "    %s_GetSplatOpacity(Index, OutOpacity);\n"
+            "}\n"),
+            *N, *S);
         return true;
     }
     return false;
