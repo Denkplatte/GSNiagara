@@ -50,7 +50,7 @@ void UNiagaraGSDataInterface::GetFunctions(TArray<FNiagaraFunctionSignature>& Ou
         FNiagaraFunctionSignature Sig;
         Sig.Name = Name_GetSplatCount;
         Sig.bMemberFunction = true;
-        Sig.bRequiresContext = true;
+        Sig.bRequiresContext = false;
         Sig.bSupportsCPU = true;
         Sig.bSupportsGPU = true;
         Sig.Inputs.Add(NDISelf());
@@ -413,11 +413,10 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
     }
     return false;
 }
-
-void UNiagaraGSDataInterface::BuildShaderParameters(FNiagaraShaderParametersBuilder& ShaderParametersBuilder) const
-{
-    ShaderParametersBuilder.AddNestedStruct<FNiagaraGSShaderParameters>();
-}
+//void UNiagaraGSDataInterface::BuildShaderParameters(FNiagaraShaderParametersBuilder& ShaderParametersBuilder) const
+//{
+ //   ShaderParametersBuilder.AddNestedStruct<FNiagaraGSShaderParameters>();
+//}
 
 void UNiagaraGSDataInterface::SetShaderParameters(const FNiagaraDataInterfaceSetShaderParametersContext& Context) const
 {
