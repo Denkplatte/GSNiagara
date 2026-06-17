@@ -6,7 +6,6 @@
 #include "GaussianSplatAsset.generated.h"
 
 /**
- * added this line before commiting since this was almost working
  * A UAsset that holds all parsed splat data for one PLY file.
  * Drag a .ply into the Content Browser → this asset is created.
  * At runtime, the Niagara Data Interface reads directly from SplatData.

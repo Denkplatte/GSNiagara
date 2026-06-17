@@ -8,18 +8,7 @@
 #include "NiagaraDataInterfaceRW.h"
 #include "GaussianSplatData.h"
 
-// ── Per-splat GPU layout ──────────────────────────────────────────────────────
-// We pack splat data into four float4 buffers.
-// float4 wastes the W channel on position and scale but keeps
-// buffer reads aligned on 16 bytes which is optimal on all GPU vendors.
-//
-// Buffer layout:
-//   Positions   [float4]  xyz=position   w=unused
-//   Scales      [float4]  xyz=scale      w=unused
-//   Rotations   [float4]  xyzw=quaternion
-//   ColorOpacity[float4]  xyz=color      w=opacity
-
-// ── Shader parameter struct ───────────────────────────────────────────────────
+// GPU Memory layout. Structured buffers wrapped by RHI Shader Resource Views (SRV)
 BEGIN_SHADER_PARAMETER_STRUCT(FNiagaraGSShaderParameters, )
     SHADER_PARAMETER(int32, SplatCount)
     SHADER_PARAMETER_SRV(Buffer<float4>, Positions)
@@ -28,11 +17,10 @@ BEGIN_SHADER_PARAMETER_STRUCT(FNiagaraGSShaderParameters, )
     SHADER_PARAMETER_SRV(Buffer<float4>, ColorOpacity)
 END_SHADER_PARAMETER_STRUCT()
 
-// ── A single typed GPU buffer + its SRV ──────────────────────────────────────
 struct FNiagaraGSSplatBuffer
 {
-    FBufferRHIRef                 Buffer;
-    FShaderResourceViewRHIRef     SRV;
+    FBufferRHIRef      Buffer;
+    FShaderResourceViewRHIRef SRV;
 
     bool IsValid() const { return Buffer.IsValid(); }
 
@@ -43,67 +31,57 @@ struct FNiagaraGSSplatBuffer
     }
 };
 
-// ── GPU Proxy ─────────────────────────────────────────────────────────────────
-// One proxy exists per NDI instance on the render thread.
-// It owns the four GPU buffers.
-//
-// IMPORTANT: UploadData_RenderThread must be called DIRECTLY on the render
-// thread (e.g. from inside an ENQUEUE_RENDER_COMMAND lambda). It must NOT
-// itself enqueue another render command — that causes double-enqueue bugs
-// where buffers are created too late and bBuffersReady is set prematurely.
-
 struct FNDIGaussianSplatProxy : public FNiagaraDataInterfaceProxyRW
 {
-    // ── GPU buffers ───────────────────────────────────────────────
     FNiagaraGSSplatBuffer PositionsBuffer;
     FNiagaraGSSplatBuffer ScalesBuffer;
     FNiagaraGSSplatBuffer RotationsBuffer;
     FNiagaraGSSplatBuffer ColorOpacityBuffer;
 
-    // Add this fallback buffer
+    // Fallback: a single zeroed float4 element bound when real data isn't ready.
+    // Prevents Unreal's shader parameter validation from crashing on null SRV slots.
     FNiagaraGSSplatBuffer FallbackBuffer;
 
-    // How many splats are in the buffers
     int32 SplatCount = 0;
-
-    // Set to true only after all four buffers are fully created on the RT
     bool bBuffersReady = false;
 
-    // Helper to generate the fallback buffer on demand
+    void UploadData(const TArray<FGaussianSplatData>& Splats);
     void InitFallbackBuffer();
 
-    // ── Upload (MUST be called on the render thread) ───────────────
-    // Creates GPU buffers synchronously within the calling render command.
-    // All RHI work happens in the same command list as the caller.
-    void UploadData_RenderThread(
-        FRHICommandListImmediate& RHICmdList,
-        const TArray<FGaussianSplatData>& Splats);
+    virtual int32 PerInstanceDataPassedToRenderThreadSize() const override { return 0; }
 
-    // ── FNiagaraDataInterfaceProxyRW interface ────────────────────
-    virtual int32 PerInstanceDataPassedToRenderThreadSize() const override
-    {
-        return 0;
-    }
-
-    // Release all GPU resources — must be called on the render thread
-    void ReleaseBuffers_RenderThread()
+    void ReleaseBuffers()
     {
         PositionsBuffer.Release();
         ScalesBuffer.Release();
         RotationsBuffer.Release();
         ColorOpacityBuffer.Release();
-        FallbackBuffer.Release(); // Make sure this is released 
         bBuffersReady = false;
         SplatCount = 0;
     }
 
+    // CRITICAL THREAD SAFETY FIX:
+    // This destructor can execute on the GC sweep channel (Game Thread).
+    // Direct RHI releases of buffer/SRV handles on the Game Thread trigger instant graphics engine driver assertions!
+    // We safely package and command-enqueue the releases onto the Render Thread.
     virtual ~FNDIGaussianSplatProxy()
     {
-        // By the time the destructor runs UE has already flushed the
-        // render thread so direct release is safe here.
-        PositionsBuffer.Release();
-        ScalesBuffer.Release();
-        RotationsBuffer.Release();
-        ColorOpacityBuffer.Release();
+        FNiagaraGSSplatBuffer TempPositions = PositionsBuffer;
+        FNiagaraGSSplatBuffer TempScales = ScalesBuffer;
+        FNiagaraGSSplatBuffer TempRotations = RotationsBuffer;
+        FNiagaraGSSplatBuffer TempColorOpacity = ColorOpacityBuffer;
+        FNiagaraGSSplatBuffer TempFallback = FallbackBuffer;
+
+        ENQUEUE_RENDER_COMMAND(NiagaraGS_ProxyReleaseRHI)(
+            [TempPositions, TempScales, TempRotations, TempColorOpacity, TempFallback](FRHICommandListImmediate& RHICmdList) mutable
+            {
+                // Execute SafeRelease safely under the correct thread!
+                TempPositions.Release();
+                TempScales.Release();
+                TempRotations.Release();
+                TempColorOpacity.Release();
+                TempFallback.Release();
+            }
+            );
     }
 };
