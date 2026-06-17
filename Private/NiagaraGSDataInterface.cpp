@@ -32,6 +32,12 @@ bool UNiagaraGSDataInterface::CopyToInternal(UNiagaraDataInterface* Destination)
 
     UNiagaraGSDataInterface* Dest = CastChecked<UNiagaraGSDataInterface>(Destination);
     Dest->SplatAsset = SplatAsset;
+
+    UE_LOG(LogTemp, Log, TEXT("NiagaraGS: CopyToInternal called. Source DI: 0x%p, Dest DI: 0x%p, Asset: %s"),
+        this, Dest, SplatAsset ? *SplatAsset->GetName() : TEXT("None"));
+
+    Dest->UploadToGPU();
+
     return true;
 }
 
@@ -73,6 +79,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatCount;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;
+        Sig.bSupportsGPU = true;
         Sig.Inputs.Add(NDISelf());
         Sig.Outputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Count")));
@@ -85,6 +93,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatPosition;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;
+        Sig.bSupportsGPU = true;
         Sig.Inputs.Add(NDISelf());
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
@@ -99,6 +109,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatScale;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;
+        Sig.bSupportsGPU = true;
         Sig.Inputs.Add(NDISelf());
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
@@ -113,6 +125,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatOrientation;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;
+        Sig.bSupportsGPU = true;
         Sig.Inputs.Add(NDISelf());
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
@@ -134,10 +148,12 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
         Sig.Inputs.Add(NDISelf());
+        Sig.bSupportsCPU = true;
+        Sig.bSupportsGPU = true;
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
         Sig.Outputs.Add(FNiagaraVariable(
-            FNiagaraTypeDefinition::GetVec3Def(), TEXT("Color")));
+            FNiagaraTypeDefinition::GetColorDef(), TEXT("Color")));
         OutFunctions.Add(Sig);
     }
 
@@ -147,6 +163,8 @@ void UNiagaraGSDataInterface::GetFunctions(
         Sig.Name = Name_GetSplatOpacity;
         Sig.bMemberFunction = true;
         Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;
+        Sig.bSupportsGPU = true;
         Sig.Inputs.Add(NDISelf());
         Sig.Inputs.Add(FNiagaraVariable(
             FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
@@ -297,6 +315,7 @@ void UNiagaraGSDataInterface::GetSplatColor(
     FNDIOutputParam<float> OutR(Context);
     FNDIOutputParam<float> OutG(Context);
     FNDIOutputParam<float> OutB(Context);
+    FNDIOutputParam<float> OutA(Context);
 
     const TArray<FGaussianSplatData>* Splats =
         (SplatAsset ? &SplatAsset->SplatData : nullptr);
@@ -312,12 +331,14 @@ void UNiagaraGSDataInterface::GetSplatColor(
             OutR.SetAndAdvance(C.X);
             OutG.SetAndAdvance(C.Y);
             OutB.SetAndAdvance(C.Z);
+            OutA.SetAndAdvance((*Splats)[Index].Opacity);
         }
         else
         {
             OutR.SetAndAdvance(0.5f);
             OutG.SetAndAdvance(0.5f);
             OutB.SetAndAdvance(0.5f);
+            OutA.SetAndAdvance(1.0f);
         }
     }
 }
@@ -636,14 +657,7 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
 
     if (FunctionInfo.DefinitionName == Name_GetSplatColor)
     {
-        OutHLSL += FString::Printf(TEXT(
-            "void %s(int Index, out float3 OutColor)\n"
-            "{\n"
-            "    OutColor = (Index >= 0 && Index < %s_SplatCount)\n"
-            "        ? %s_ColorOpacity[Index].xyz\n"
-            "        : float3(0.5, 0.5, 0.5);\n"
-            "}\n"),
-            *FunctionInfo.InstanceName, *Sym, *Sym, *Sym);
+        OutHLSL += FString::Printf(TEXT("void %s(int Index, out float4 OutColor)\\n{\\n    %s_GetSplatColor(Index, OutColor);\\n}\\n"), *FunctionInfo.InstanceName, *Sym);
         return true;
     }
 

@@ -57,10 +57,7 @@ public:
     // Tell Niagara this NDI supports GPU compute sims
     // (the actual GPU impl comes in Step 5 — this must return true
     //  or Niagara will refuse to use us in a GPU emitter)
-    virtual bool CanExecuteOnTarget(ENiagaraSimTarget Target) const override
-    {
-        return Target == ENiagaraSimTarget::GPUComputeSim;
-    }
+    virtual bool CanExecuteOnTarget(ENiagaraSimTarget Target) const override { return true; }
 
     // Required for Niagara to correctly copy/compare NDI instances
     virtual bool CopyToInternal(UNiagaraDataInterface* Destination) const override;
