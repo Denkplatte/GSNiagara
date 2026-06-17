@@ -190,39 +190,25 @@ void UNiagaraGSDataInterface::GetVMExternalFunction(
 }
 
 // ── CPU function implementations ──────────────────────────────────────────────
-
-void UNiagaraGSDataInterface::GetSplatCount(
-    FVectorVMExternalFunctionContext& Context)
+void UNiagaraGSDataInterface::GetSplatCount(FVectorVMExternalFunctionContext& Context)
 {
-    VectorVM::FUserPtrHandler<UNiagaraGSDataInterface> InstData(Context);
     FNDIOutputParam<int32> OutCount(Context);
-
     const int32 Count = GetSplatCount();
-    const int32 NumInstances = Context.GetNumInstances();
-
-    for (int32 i = 0; i < NumInstances; ++i)
-    {
-        OutCount.SetAndAdvance(Count);
-    }
+    for (int32 i = 0; i < Context.GetNumInstances(); ++i) { OutCount.SetAndAdvance(Count); }
 }
 
-void UNiagaraGSDataInterface::GetSplatPosition(
-    FVectorVMExternalFunctionContext& Context)
+
+void UNiagaraGSDataInterface::GetSplatPosition(FVectorVMExternalFunctionContext& Context)
 {
-    VectorVM::FUserPtrHandler<UNiagaraGSDataInterface> InstData(Context);
-    FNDIInputParam<int32>  InIndex(Context);
+    FNDIInputParam<int32> InIndex(Context); // Now correctly pops the actual Index argument from register stack!
     FNDIOutputParam<float> OutX(Context);
     FNDIOutputParam<float> OutY(Context);
     FNDIOutputParam<float> OutZ(Context);
 
-    const TArray<FGaussianSplatData>* Splats =
-        (SplatAsset ? &SplatAsset->SplatData : nullptr);
-
-    const int32 NumInstances = Context.GetNumInstances();
-    for (int32 i = 0; i < NumInstances; ++i)
+    const TArray<FGaussianSplatData>* Splats = (SplatAsset ? &SplatAsset->SplatData : nullptr);
+    for (int32 i = 0; i < Context.GetNumInstances(); ++i)
     {
         const int32 Index = InIndex.GetAndAdvance();
-
         if (Splats && Splats->IsValidIndex(Index))
         {
             const FVector3f& Pos = (*Splats)[Index].Position;
@@ -230,12 +216,7 @@ void UNiagaraGSDataInterface::GetSplatPosition(
             OutY.SetAndAdvance(Pos.Y);
             OutZ.SetAndAdvance(Pos.Z);
         }
-        else
-        {
-            OutX.SetAndAdvance(0.0f);
-            OutY.SetAndAdvance(0.0f);
-            OutZ.SetAndAdvance(0.0f);
-        }
+        else { OutX.SetAndAdvance(0.f); OutY.SetAndAdvance(0.f); OutZ.SetAndAdvance(0.f); }
     }
 }
 
@@ -366,6 +347,7 @@ void UNiagaraGSDataInterface::GetSplatOpacity(
         }
     }
 }
+
 
 // ── FNDIGaussianSplatProxy::UploadData_RenderThread ───────────────────────────
 //
@@ -550,12 +532,34 @@ void UNiagaraGSDataInterface::PostEditChangeProperty(
 #endif
 
 // ── GetParameterDefinitionHLSL ────────────────────────────────────────────────
+//
+// We inline the buffer declarations directly instead of using #include.
+// Reasons:
+//   1. The #include path depends on the virtual shader directory mapping
+//      being registered before the shader compiler worker picks up the job.
+//      If that races, the worker stalls waiting for a file it can't find and
+//      the Niagara compile spinner never finishes.
+//   2. The .ush file also contained helper function definitions that duplicate
+//      what GetFunctionHLSL emits below — double-definition causes silent HLSL
+//      compiler errors that also manifest as an infinite compile hang.
+//
+// Inlining here is exactly what UE's own built-in NDIs do (e.g. NiagaraDI Grid2D).
+// {DataInterfaceHLSLSymbol} / Sym is substituted by Niagara at compile time
+// with a unique per-instance prefix so multiple NDI instances don't collide.
 
 void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
     const FNiagaraDataInterfaceGPUParamInfo& ParamInfo,
     FString& OutHLSL)
 {
-    OutHLSL += TEXT("#include \"/NiagaraGS/NiagaraGSDataInterface.ush\"\n");
+    const FString& Sym = ParamInfo.DataInterfaceHLSLSymbol;
+
+    OutHLSL += FString::Printf(TEXT(
+        "int            %s_SplatCount;\n"
+        "Buffer<float4> %s_Positions;\n"
+        "Buffer<float4> %s_Scales;\n"
+        "Buffer<float4> %s_Rotations;\n"
+        "Buffer<float4> %s_ColorOpacity;\n"
+    ), *Sym, *Sym, *Sym, *Sym, *Sym);
 }
 
 // ── GetFunctionHLSL ───────────────────────────────────────────────────────────
@@ -568,12 +572,16 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
 {
     const FString& Sym = ParamInfo.DataInterfaceHLSLSymbol;
 
+    // All function bodies are fully self-contained HLSL that reads the buffer
+    // variables declared in GetParameterDefinitionHLSL above.
+    // No .ush helpers are called — the include was removed to fix compile hangs.
+
     if (FunctionInfo.DefinitionName == Name_GetSplatCount)
     {
         OutHLSL += FString::Printf(TEXT(
             "void %s(out int OutCount)\n"
             "{\n"
-            "    %s_GetSplatCount(OutCount);\n"
+            "    OutCount = %s_SplatCount;\n"
             "}\n"),
             *FunctionInfo.InstanceName, *Sym);
         return true;
@@ -584,9 +592,11 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
         OutHLSL += FString::Printf(TEXT(
             "void %s(int Index, out float3 OutPosition)\n"
             "{\n"
-            "    %s_GetSplatPosition(Index, OutPosition);\n"
+            "    OutPosition = (Index >= 0 && Index < %s_SplatCount)\n"
+            "        ? %s_Positions[Index].xyz\n"
+            "        : float3(0, 0, 0);\n"
             "}\n"),
-            *FunctionInfo.InstanceName, *Sym);
+            *FunctionInfo.InstanceName, *Sym, *Sym, *Sym);
         return true;
     }
 
@@ -595,23 +605,32 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
         OutHLSL += FString::Printf(TEXT(
             "void %s(int Index, out float3 OutScale)\n"
             "{\n"
-            "    %s_GetSplatScale(Index, OutScale);\n"
+            "    OutScale = (Index >= 0 && Index < %s_SplatCount)\n"
+            "        ? %s_Scales[Index].xyz\n"
+            "        : float3(1, 1, 1);\n"
             "}\n"),
-            *FunctionInfo.InstanceName, *Sym);
+            *FunctionInfo.InstanceName, *Sym, *Sym, *Sym);
         return true;
     }
 
     if (FunctionInfo.DefinitionName == Name_GetSplatOrientation)
     {
         OutHLSL += FString::Printf(TEXT(
-            "void %s(int Index,"
-            " out float OutQX, out float OutQY,"
-            " out float OutQZ, out float OutQW)\n"
+            "void %s(int Index,\n"
+            "    out float OutQX, out float OutQY,\n"
+            "    out float OutQZ, out float OutQW)\n"
             "{\n"
-            "    %s_GetSplatOrientation(Index,"
-            " OutQX, OutQY, OutQZ, OutQW);\n"
+            "    if (Index >= 0 && Index < %s_SplatCount)\n"
+            "    {\n"
+            "        float4 Q = %s_Rotations[Index];\n"
+            "        OutQX = Q.x; OutQY = Q.y; OutQZ = Q.z; OutQW = Q.w;\n"
+            "    }\n"
+            "    else\n"
+            "    {\n"
+            "        OutQX = 0; OutQY = 0; OutQZ = 0; OutQW = 1;\n"
+            "    }\n"
             "}\n"),
-            *FunctionInfo.InstanceName, *Sym);
+            *FunctionInfo.InstanceName, *Sym, *Sym);
         return true;
     }
 
@@ -620,9 +639,11 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
         OutHLSL += FString::Printf(TEXT(
             "void %s(int Index, out float3 OutColor)\n"
             "{\n"
-            "    %s_GetSplatColor(Index, OutColor);\n"
+            "    OutColor = (Index >= 0 && Index < %s_SplatCount)\n"
+            "        ? %s_ColorOpacity[Index].xyz\n"
+            "        : float3(0.5, 0.5, 0.5);\n"
             "}\n"),
-            *FunctionInfo.InstanceName, *Sym);
+            *FunctionInfo.InstanceName, *Sym, *Sym, *Sym);
         return true;
     }
 
@@ -631,9 +652,11 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
         OutHLSL += FString::Printf(TEXT(
             "void %s(int Index, out float OutOpacity)\n"
             "{\n"
-            "    %s_GetSplatOpacity(Index, OutOpacity);\n"
+            "    OutOpacity = (Index >= 0 && Index < %s_SplatCount)\n"
+            "        ? %s_ColorOpacity[Index].w\n"
+            "        : 0.0;\n"
             "}\n"),
-            *FunctionInfo.InstanceName, *Sym);
+            *FunctionInfo.InstanceName, *Sym, *Sym, *Sym);
         return true;
     }
 
@@ -648,24 +671,46 @@ void UNiagaraGSDataInterface::BuildShaderParameters(
     ShaderParametersBuilder.AddNestedStruct<FNiagaraGSShaderParameters>();
 }
 
+void FNDIGaussianSplatProxy::InitFallbackBuffer()
+{
+    if (FallbackBuffer.IsValid()) return;
+
+    // Create an arbitrary 1-element mock vector block
+    const int32 BufferSize = sizeof(FVector4f);
+    FVector4f ZeroData(0.f, 0.f, 0.f, 0.f);
+
+    FRHIBufferCreateDesc CreateInfo = FRHIBufferCreateDesc::Create(
+        TEXT("GS_Fallback"),
+        EBufferUsageFlags::Static | EBufferUsageFlags::ShaderResource)
+        .SetSize(BufferSize)
+        .SetStride(sizeof(FVector4f))
+        .SetInitialState(ERHIAccess::SRVCompute);
+
+    FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+
+    FallbackBuffer.Buffer = RHICmdList.CreateBuffer(CreateInfo);
+    void* Dest = RHICmdList.LockBuffer(FallbackBuffer.Buffer, 0, BufferSize, RLM_WriteOnly);
+    FMemory::Memcpy(Dest, &ZeroData, BufferSize);
+    RHICmdList.UnlockBuffer(FallbackBuffer.Buffer);
+
+    FShaderResourceViewInitializer ViewInit(FallbackBuffer.Buffer, PF_A32B32G32R32F);
+    FallbackBuffer.SRV = RHICmdList.CreateShaderResourceView(ViewInit);
+}
+
 // ── SetShaderParameters ───────────────────────────────────────────────────────
 
 void UNiagaraGSDataInterface::SetShaderParameters(
     const FNiagaraDataInterfaceSetShaderParametersContext& Context) const
 {
-    FNDIGaussianSplatProxy& SplatProxy =
-        Context.GetProxy<FNDIGaussianSplatProxy>();
+    FNDIGaussianSplatProxy& SplatProxy = Context.GetProxy<FNDIGaussianSplatProxy>();
 
-    FNiagaraGSShaderParameters* Params =
-        Context.GetParameterNestedStruct<FNiagaraGSShaderParameters>();
+    // Initialise fallback buffer when no Splat Asset is loaded
+    SplatProxy.InitFallbackBuffer();
 
+    FNiagaraGSShaderParameters* Params = Context.GetParameterNestedStruct<FNiagaraGSShaderParameters>();
     if (!Params) return;
 
-    if (SplatProxy.bBuffersReady
-        && SplatProxy.PositionsBuffer.IsValid()
-        && SplatProxy.ScalesBuffer.IsValid()
-        && SplatProxy.RotationsBuffer.IsValid()
-        && SplatProxy.ColorOpacityBuffer.IsValid())
+    if (SplatProxy.bBuffersReady)
     {
         Params->SplatCount = SplatProxy.SplatCount;
         Params->Positions = SplatProxy.PositionsBuffer.SRV;
@@ -675,10 +720,12 @@ void UNiagaraGSDataInterface::SetShaderParameters(
     }
     else
     {
+        // ✅ Bind a valid Dummy SRV instead of nullptr!
+        FRHIShaderResourceView* FallbackSRV = SplatProxy.FallbackBuffer.SRV;
         Params->SplatCount = 0;
-        Params->Positions = nullptr;
-        Params->Scales = nullptr;
-        Params->Rotations = nullptr;
-        Params->ColorOpacity = nullptr;
+        Params->Positions = FallbackSRV;
+        Params->Scales = FallbackSRV;
+        Params->Rotations = FallbackSRV;
+        Params->ColorOpacity = FallbackSRV;
     }
 }

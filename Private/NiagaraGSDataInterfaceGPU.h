@@ -60,11 +60,17 @@ struct FNDIGaussianSplatProxy : public FNiagaraDataInterfaceProxyRW
     FNiagaraGSSplatBuffer RotationsBuffer;
     FNiagaraGSSplatBuffer ColorOpacityBuffer;
 
+    // Add this fallback buffer
+    FNiagaraGSSplatBuffer FallbackBuffer;
+
     // How many splats are in the buffers
     int32 SplatCount = 0;
 
     // Set to true only after all four buffers are fully created on the RT
     bool bBuffersReady = false;
+
+    // Helper to generate the fallback buffer on demand
+    void InitFallbackBuffer();
 
     // ── Upload (MUST be called on the render thread) ───────────────
     // Creates GPU buffers synchronously within the calling render command.
@@ -86,6 +92,7 @@ struct FNDIGaussianSplatProxy : public FNiagaraDataInterfaceProxyRW
         ScalesBuffer.Release();
         RotationsBuffer.Release();
         ColorOpacityBuffer.Release();
+        FallbackBuffer.Release(); // Make sure this is released 
         bBuffersReady = false;
         SplatCount = 0;
     }
