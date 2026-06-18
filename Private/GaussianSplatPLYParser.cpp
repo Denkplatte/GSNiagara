@@ -39,18 +39,15 @@ FVector3f FGaussianSplatPLYParser::ConvertPosition(float x, float y, float z)
 }
 
 // PLY scale is log-scale, needs sigmoid activation, then cm conversion
+// CURRENT — using exp()
 FVector3f FGaussianSplatPLYParser::ConvertScale(float sx, float sy, float sz)
 {
-    // exp() to un-log, then * 100 for meters → cm
-    // Note: some loaders use exp() directly (3DGS paper), 
-    // others use sigmoid. We use exp() to match the original 3DGS convention.
     return FVector3f(
         FMath::Exp(sx) * 100.0f,
         FMath::Exp(sy) * 100.0f,
         FMath::Exp(sz) * 100.0f
     );
 }
-
 // PLY quaternion is (rot_0=w, rot_1=x, rot_2=y, rot_3=z)
 // UE FQuat4f is (X, Y, Z, W)
 // We also need to apply the same axis flip as position.

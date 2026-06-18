@@ -17,7 +17,7 @@ void FNiagaraGSModule::StartupModule()
         IPluginManager::Get().FindPlugin(TEXT("NiagaraGS"))->GetBaseDir(),
         TEXT("Shaders")
     );
-    AddShaderSourceDirectoryMapping(TEXT("/NiagaraGS"), PluginShaderDir);
+    //AddShaderSourceDirectoryMapping(TEXT("/NiagaraGS"), PluginShaderDir);
 
 #if WITH_EDITOR
     // Register asset type actions so the Content Browser
